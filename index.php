@@ -37,7 +37,7 @@ if( isset($_POST["lieu"]) && !empty($_POST["lieu"]) ) {
 	$guess = str_replace("é", "e", $guess);
 
 	if($lieu === $guess) {
-		echo "<p>Bravo !!! On se retrouve en février pour les inscriptions</p>";
+		echo "<p>Bravo !!! On se retrouve en février pour les inscriptions 😊🥝</p>";
 		echo '<iframe src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d2818.59921883855!2d4.392654075216349!3d45.053354260758695!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x47f582c0cead31b1%3A0xa2b406d6fd56610f!2sCamping%20du%20Lac%20de%20Devesset!5e0!3m2!1sfr!2sfr!4v1765024671043!5m2!1sfr!2sfr" width="600" height="450" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>';
 	}
 }
