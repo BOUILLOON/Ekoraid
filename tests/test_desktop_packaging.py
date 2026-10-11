@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 import stat
+import subprocess
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -164,3 +166,28 @@ def test_production_runtime_pins_are_https_archives_with_stable_versions():
         assert item["version"] in item["url"]
         assert len(item["sha256"]) == 64
         assert "latest" not in item["url"]
+
+
+@pytest.mark.parametrize("status", [None, "passed"])
+def test_frozen_smoke_failure_diagnostics_do_not_depend_on_error_report(tmp_path, monkeypatch, status):
+    report = tmp_path / "windows-smoke.json"
+    if status:
+        report.write_text(json.dumps({"status": status}), encoding="utf-8")
+    def failed_command(command, **options):
+        assert options["capture_output"] is True
+        assert options["encoding"] == "utf-8"
+        return SimpleNamespace(returncode=1, stdout="fixture stdout", stderr="UnicodeEncodeError: diagnostic fixture")
+    monkeypatch.setattr(build.subprocess, "run", failed_command)
+    with pytest.raises(RuntimeError, match="UnicodeEncodeError") as caught:
+        build.run_frozen_smoke(tmp_path / "fixture.exe", report)
+    assert "fixture stdout" in str(caught.value)
+    assert "report " + (status or "absent") in str(caught.value)
+
+
+def test_frozen_smoke_timeout_preserves_byte_stream_diagnostics(tmp_path, monkeypatch):
+    def timeout(command, **options):
+        raise subprocess.TimeoutExpired(command, 180, output=b"fixture output", stderr=b"stalled module")
+    monkeypatch.setattr(build.subprocess, "run", timeout)
+    with pytest.raises(RuntimeError, match="stalled module") as caught:
+        build.run_frozen_smoke(tmp_path / "fixture.exe", tmp_path / "report.json")
+    assert "fixture output" in str(caught.value)

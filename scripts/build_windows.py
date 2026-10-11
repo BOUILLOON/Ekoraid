@@ -164,6 +164,30 @@ def bundle_zip(directory: Path, destination: Path) -> str:
     return digest
 
 
+def run_frozen_smoke(executable: Path, report_path: Path) -> None:
+    command = [sys.executable, str(ROOT / "scripts" / "packaging" / "windows_smoke.py"), "--executable", str(executable), "--report", str(report_path)]
+    try:
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+    except subprocess.TimeoutExpired as error:
+        def tail(value):
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            return (value or "")[-8000:]
+        raise RuntimeError("Frozen Windows smoke timed out.\nstdout:\n" + tail(error.stdout) + "\nstderr:\n" + tail(error.stderr)) from error
+    if result.returncode:
+        status = "absent"
+        if report_path.is_file():
+            try:
+                status = str(json.loads(report_path.read_text(encoding="utf-8")).get("status", "unknown"))
+            except (OSError, ValueError):
+                status = "unreadable"
+        raise RuntimeError(f"Frozen Windows smoke failed (code {result.returncode}, report {status}).\nstdout:\n{result.stdout[-4000:]}\nstderr:\n{result.stderr[-8000:]}")
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="", flush=True)
+
+
 def build(work: Path, destination: Path, *, run_smoke: bool = True) -> Path:
     if os.name != "nt" or sys.maxsize <= 2**32:
         raise RuntimeError("Build on a Windows x64 runner; cross-compilation from Linux is unsupported.")
@@ -217,7 +241,7 @@ yt-dlp et yt-dlp-ejs : versions épinglées de requirements.txt, composants Java
     (directory / "build-info.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     check_bundle_files(directory)
     if run_smoke:
-        subprocess.run([sys.executable, str(ROOT / "scripts" / "packaging" / "windows_smoke.py"), "--executable", str(directory / "Studio-Fanny.exe"), "--report", str(work / "windows-smoke.json")], cwd=ROOT, check=True, timeout=180)
+        run_frozen_smoke(directory / "Studio-Fanny.exe", work / "windows-smoke.json")
     destination.mkdir(parents=True, exist_ok=True)
     zip_path = destination / "Studio-Fanny-Windows.zip"
     digest = bundle_zip(directory, zip_path)
