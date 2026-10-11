@@ -6,11 +6,12 @@ Résultats obtenus le **11 octobre 2026**, dans l’environnement Linux de déve
 | --- | --- |
 | Suite Python du projet | **89 tests Pytest réussis** : API invités et administrateur, sessions, CSRF, votes, sources, file, bibliothèque, exports et intégration cloud. |
 | Navigateur Chromium | **23 vérifications réussies**, sur écran de 1 440 px et écran mobile de 390 px. Aucun débordement horizontal de la page, aucune exception JavaScript, aucune erreur console ou requête échouée, aucune ressource extérieure chargée par l’interface locale. |
+| Champ de recherche | Après ajustement CSS, vérification ciblée du site généré à 1 440 px et 390 px : texte séparé de l’icône, marge gauche 47 px et aucun débordement. Aucun appel cloud pour ce contrôle visuel. |
 | Audio local | Import d’un WAV silencieux généré pour le test, vérification par ffprobe, renommage avec accents, récupération du ZIP depuis le navigateur et contrôle des fichiers M3U8 UTF-8 utilisant des chemins relatifs. |
 | Installation et services Linux | Installation réutilisable, diagnostics et génération du site statique réussis. Démarrage, arrêt et redémarrage des services contrôlés ; commande d’arrêt et superviseur terminés avec le code **0**. |
 | Docker sous Linux | Image réellement construite, avec vérification TLS et sommes de contrôle conservées. Diagnostics et requêtes aux services invités/administrateur réussis dans un conteneur sans accès réseau extérieur, puis conteneur arrêté. |
 | Scripts Windows | Revue des scripts sans exécution PowerShell. L’installation et le lancement sur Windows 11 restent à essayer sur le PC de l’organisateur. |
-| GitHub Pages | **Construction et déploiement réussis** par le workflow [38156759298](https://github.com/BOUILLOON/Ekoraid/actions/runs/38156759298), commit `4e6c7b8`. L’API Pages confirme un site public, HTTPS obligatoire et source GitHub Actions à https://bouilloon.github.io/Ekoraid/. La lecture directe de cette URL depuis l’environnement Codex reste refusée par son proxy réseau (CONNECT 403 avant toute réponse du site) ; aucune vérification HTTP/navigateur à cette URL n’est revendiquée. |
+| GitHub Pages | **Construction et déploiement réussis** par le workflow [38157177635](https://github.com/BOUILLOON/Ekoraid/actions/runs/38157177635), commit `964c14c`. L’API Pages confirme un site public, HTTPS obligatoire et source GitHub Actions à https://bouilloon.github.io/Ekoraid/. La lecture directe de cette URL depuis l’environnement Codex reste refusée par son proxy réseau (CONNECT 403 avant toute réponse du site) ; aucune vérification HTTP/navigateur à cette URL n’est revendiquée. |
 
 ## Parcours vérifiés dans le navigateur
 
