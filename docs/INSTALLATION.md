@@ -4,7 +4,7 @@ Le site public <https://bouilloon.github.io/Ekoraid/> collecte les propositions 
 
 ## Windows 11 — version autonome recommandée
 
-La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1). Son lancement et la préparation d’un audio généré ont été vérifiés sur Windows en CI. Le [guide de l’administration](ADMINISTRATION.md) décrit ensuite la sélection et la récupération des musiques.
+La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows corrigée](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2). Son démarrage sans console, au premier lancement et avec une configuration existante, ainsi que la préparation audio ont été vérifiés sur Windows en CI. Le [guide de l’administration](ADMINISTRATION.md) décrit ensuite la sélection et la récupération des musiques.
 
 1. [Téléchargez l’archive Windows](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur le ZIP, puis **Extraire tout**. Ne lancez pas l’application directement depuis l’archive et gardez tout le dossier extrait ensemble.
@@ -238,8 +238,8 @@ Le checkout est monté dans `/app` pour conserver `.env.local` et `data/` lorsqu
 
 Si la fenêtre du studio s’ouvre, utilisez **Réglages & diagnostics → Vérifier les prérequis**. Pour changer la connexion privée ou retrouver l’accès, cliquez sur **Arrêter le studio**, puis **Configurer la connexion** ou **Changer mon mot de passe** dans la fenêtre de l’application. **Ouvrir le studio** permet de rouvrir le navigateur.
 
-- **Une erreur contenant `[WinError 6]` apparaît avant la fenêtre du studio** : c’est une erreur du lanceur. Utilisez une [release officielle](https://github.com/BOUILLOON/Ekoraid/releases) dont les notes confirment le lancement par double-clic **sans console**. Extrayez son ZIP dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et votre ancienne installation ; vous n’avez pas à refaire votre connexion Supabase ni à remplacer `.env.local`.
-- **Windows affiche « Windows a protégé votre ordinateur » ou « Éditeur inconnu »** : c’est un avertissement SmartScreen pour une application sans signature d’éditeur, distinct de l’erreur ci-dessus. Vérifiez que le ZIP provient des [Releases officielles](https://github.com/BOUILLOON/Ekoraid/releases). **Informations complémentaires** permet d’inspecter l’application concernée avant de choisir les options proposées par Windows.
+- **Une erreur contenant `[WinError 6]` apparaît avant la fenêtre du studio** : utilisez la [version corrigée `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2), vérifiée sans console. [Téléchargez son ZIP](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), puis **Extraire tout** dans un nouveau dossier ; gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et votre ancienne installation, y compris la configuration privée. Vous n’avez pas à refaire votre connexion Supabase ni à remplacer `.env.local`.
+- **Windows affiche exactement « Windows a protégé votre ordinateur »** : pour le ZIP téléchargé depuis la [release officielle](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2), cliquez sur **Informations complémentaires / More info**, puis **Exécuter quand même / Run anyway**. Cet avertissement SmartScreen est distinct de WinError 6 ; la mention **Éditeur inconnu** peut rester, car l’application n’a pas de signature d’éditeur.
 
 Les commandes suivantes concernent uniquement la version source :
 

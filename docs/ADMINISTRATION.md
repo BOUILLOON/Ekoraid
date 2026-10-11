@@ -12,7 +12,7 @@ Pour les **25 ans de Fanny, le 17 octobre 2026 dès 19 h, à la salle des fêtes
 
 ## 1. Installer le studio sur Windows
 
-La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1). Son lancement et la préparation d’un audio généré ont été vérifiés sur Windows en CI.
+La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows corrigée](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2). Son démarrage sans console, au premier lancement et avec une configuration existante, ainsi que la préparation audio ont été vérifiés sur Windows en CI.
 
 1. [Téléchargez Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur l’archive, puis **Extraire tout**. Gardez le dossier extrait entier.
@@ -130,9 +130,9 @@ Le bouton **Écouter** ouvre un aperçu YouTube uniquement après un clic. Il n�
 
 Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le studio**. Pour un diagnostic, utilisez **Réglages & diagnostics → Vérifier les prérequis**. Pour corriger Supabase, arrêtez le studio, puis utilisez **Configurer la connexion**. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
 
-Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, elle vient du lanceur. Choisissez une [release officielle](https://github.com/BOUILLOON/Ekoraid/releases) dont les notes confirment le lancement par double-clic **sans console**. Extrayez le nouveau ZIP dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation : votre configuration et vos données restent à leur emplacement, sans connexion à refaire.
+Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, [téléchargez le ZIP corrigé](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip) de la [version `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2), vérifiée sans console. Faites **Extraire tout** dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation, avec leur configuration privée : vos données restent à leur emplacement, sans connexion Supabase à refaire.
 
-Un message Windows **« Windows a protégé votre ordinateur »** ou **« Éditeur inconnu »** est différent : SmartScreen signale l’absence de signature d’éditeur. Vérifiez la provenance officielle du ZIP ; **Informations complémentaires** permet de voir l’application concernée. Le [guide d’installation](INSTALLATION.md#pour-déboguer) distingue ces deux situations.
+Si Windows affiche exactement **« Windows a protégé votre ordinateur »**, pour ce ZIP provenant de la release officielle, cliquez sur **Informations complémentaires / More info**, puis **Exécuter quand même / Run anyway**. Cet avertissement SmartScreen est différent de WinError 6. La mention **Éditeur inconnu** peut rester, car l’application n’a pas de signature d’éditeur. Le [guide d’installation](INSTALLATION.md#pour-déboguer) détaille ces deux situations.
 
 Un refus de récupération cloud demande de vérifier la clé privée et le projet Supabase. Une erreur YouTube ne supprime pas les demandes enregistrées. Un manque d’espace exige de libérer de la place avant de réessayer ; le pack et son ZIP occupent de l’espace supplémentaire.
 

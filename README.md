@@ -16,7 +16,7 @@ Vous pouvez aussi utiliser ce serveur local pour la collecte avec un tunnel HTTP
 
 ## Ouvrir le studio sur Windows 11
 
-La version autonome **Studio-Fanny-Windows.zip est disponible**, avec ses outils inclus, dans la [release Windows](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1). Le lancement, la préparation d’un audio généré et le ZIP ont été vérifiés sur Windows en CI.
+La version autonome **Studio-Fanny-Windows.zip est disponible**, avec ses outils inclus, dans la [release Windows corrigée](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2). Le démarrage sans console, au premier lancement et avec une configuration existante, ainsi que la préparation audio et le ZIP ont été vérifiés sur Windows en CI.
 
 1. [Téléchargez l’archive Windows](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), faites un clic droit dessus et choisissez **Extraire tout**. Gardez le dossier extrait entier.
 2. Ouvrez le dossier `Studio-Fanny`, puis double-cliquez sur **Studio-Fanny.exe**. Python, Node.js, FFmpeg et ffprobe sont inclus : aucun terminal ni installation séparée de ces outils n’est nécessaire.

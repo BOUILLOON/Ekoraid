@@ -2,7 +2,7 @@
 
 Ces idées complètent les fonctions déjà présentes : recherche, propositions de playlists, photos, aperçu vidéo, votes, retrait personnel, durées, préparation groupée, ZIP et partage sur le Wi-Fi. Elles ne sont pas toutes implémentées.
 
-Les corrections en cours portent sur le démarrage Windows sans console et l’indication des morceaux déjà proposés avant l’ajout. Les propositions et votes doivent rester conservés pendant toutes les évolutions ; aucune idée ci-dessous ne nécessite de limiter le nombre total de morceaux des invités.
+Les corrections livrées portent sur le démarrage Windows sans console et l’indication des morceaux déjà proposés avant l’ajout sur le site public. Les propositions et votes doivent rester conservés pendant toutes les évolutions ; aucune idée ci-dessous ne nécessite de limiter le nombre total de morceaux des invités.
 
 ## Les trois prochaines priorités proposées
 

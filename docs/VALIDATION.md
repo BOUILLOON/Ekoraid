@@ -4,9 +4,9 @@ Résultats obtenus le **11 octobre 2026**. Les tests de développement utilisent
 
 | Vérification | Résultat obtenu pour cette version |
 | --- | --- |
-| Suite Python | **260 tests réussis, 1 ignoré et 7 sous-tests**, en **20,67 s**. Le test ignoré exige PowerShell, absent de cet environnement Linux. La suite couvre les API, les permissions, les photos, les durées, les playlists proposées, les migrations, la file, les fichiers, les exports, la synchronisation et le lancement autonome. |
-| Distribution Windows : tests locaux | **30 tests réussis et 1 ignoré** sous Linux, où PowerShell est absent. Le même groupe de tests réussit dans le workflow Windows, y compris l’analyse des scripts PowerShell. |
-| Navigateur avec le vrai backend local | **51 vérifications réussies et 15 captures**, à 1 440 px et 390 px. API, SQLite, profils, WAV généré et ZIP réellement utilisés ; métadonnées YouTube et lecteurs vidéo simulés. Aucune erreur JavaScript, console ou réseau, aucune requête extérieure inattendue. |
+| Suite Python | **295 tests réussis, 1 ignoré et 7 sous-tests**, en **20,92 s**. Le test ignoré exige PowerShell, absent de cet environnement Linux. La suite couvre les API, les permissions, les photos, les durées, les playlists proposées, les doublons et courses entre invités, les migrations, la file, les fichiers, les exports, la synchronisation et le lancement autonome sans console. |
+| Distribution Windows : tests locaux | **55 tests réussis et 1 ignoré** sous Linux, où PowerShell est absent. Le même groupe de tests réussit dans le workflow Windows, y compris l’analyse des scripts PowerShell. |
+| Navigateur avec le vrai backend local | **59 vérifications réussies et 17 captures**, à 1 440 px et 390 px. API, SQLite, profils, doublons et courses entre invités, WAV généré et ZIP réellement utilisés ; métadonnées YouTube et lecteurs vidéo simulés. Aucune erreur JavaScript, console ou réseau, aucune requête extérieure inattendue. |
 | Catalogue de 20 001 éléments dans Chromium | **14 vérifications réussies**, avec données et réponses API simulées. Pagination, recherche complète, sélection groupée, file, bibliothèque et pack vérifiés sans afficher tout le catalogue à la fois. |
 | Photos et durées dans Chromium | **11 vérifications ciblées réussies**, avec images générées et API simulée : JPEG/WebP, recadrage, annulation, enregistrement, retrait, identité conservée, durées distinctes et inconnues. |
 | Synchronisation cloud | **16 tests réussis et 7 sous-tests**, avec snapshots simulés. Conservation des identifiants, corrections, votes, retraits et photos ; récupération de gros catalogues par lots. |
@@ -17,14 +17,15 @@ Résultats obtenus le **11 octobre 2026**. Les tests de développement utilisent
 | Recherche YouTube réelle | HTTP **200** pour une recherche de morceaux et pour les métadonnées d’une vidéo précise ; cette dernière renvoie une durée de **143 s**, via `youtube-public-search-exact-video`. Aucun audio téléchargé. |
 | Durées des propositions existantes | Durées réelles complétées pour **27 sources vidéo**, uniquement lorsque leur durée était absente. **7 vidéos non résolues** et les demandes manuelles sans source restent inconnues. Identifiants et propriétaires conservés ; titres, artistes, états, ordre et votes non modifiés. |
 | Interface publiée avec Supabase réel | Le dossier exact `_site` servi localement a reçu de vraies réponses Supabase dans Chromium à **1 440 px et 390 px** : **33 propositions publiques**, recherche « Dalida » avec **5 résultats réels et leurs durées**, aucune erreur JavaScript ni débordement. Aucun invité, proposition ou vote de test créé. |
-| GitHub Pages | Déploiement [38166729295](https://github.com/BOUILLOON/Ekoraid/actions/runs/38166729295) **réussi**, commit `544a86e`. Le site inclut le téléchargement direct du studio Windows vérifié. |
-| Exécutable Windows autonome | Workflow [38166188497](https://github.com/BOUILLOON/Ekoraid/actions/runs/38166188497) **réussi**, commit `45aae4c`. Les **10 contrôles de l’application compilée** ont réussi sur Windows-2025 avec Python 3.12.10 ; la [release stable](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1) est publiée. |
+| GitHub Pages | Déploiement [38169643565](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169643565) **réussi**, commit `9ba3307`. Le site inclut la détection de doublons avant ajout et le téléchargement direct du studio Windows corrigé. |
+| Exécutable Windows autonome | Workflow [38169483844](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169483844) **réussi**, commit `cc08e9e`. Les **12 contrôles de l’application compilée** ont réussi sur Windows-2025 avec Python 3.12.10, dont premier démarrage et lancement configuré avec entrées/sorties standard absentes ; la [release stable `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) est publiée. |
 
 ## Parcours vérifiés avec le vrai backend local
 
 Le test navigateur démarre les services sur des ports locaux libres, avec une base et des identifiants temporaires. Il arrête ses processus et supprime sa base à la fin, sans modifier la configuration privée de l’installation.
 
 - Pseudo persistant, proposition manuelle, lien canonique, votes, recherche, filtre « Mes propositions » et séparation de deux navigateurs portant le même pseudo ou partageant la même IP.
+- Détection d’un morceau, d’une demande manuelle ou d’une playlist déjà proposée avant ajout, avec **Retrouver** et vote unique. Une course entre deux invités conserve une seule proposition. Deux vidéos portant le même titre restent distinctes ; une proposition retirée peut être proposée à nouveau. Retrouver ouvre la bonne page du catalogue et rétablit les filtres.
 - Photo recadrée au centre en PNG de **128 × 128 pixels**, enregistrée par l’API dans SQLite puis affichée après rechargement. Une autre identité voit la photo publique sans obtenir les droits du profil. Retirer la photo conserve l’identité, les propositions et les votes.
 - Retrait personnel annulé puis confirmé, listes et compteurs actualisés, impossibilité de retirer les propositions d’autrui ou de valider celles déjà retirées.
 - Proposition d’un lien de playlist enregistrée comme **une seule proposition**, sans développement automatique ni lecteur de vidéo isolée. Pour une URL vidéo et playlist, les deux choix explicites sont conservés par l’API.
@@ -36,7 +37,7 @@ Le test navigateur démarre les services sur des ports locaux libres, avec une b
 - Création du partage ZIP, QR, expiration de dix minutes, téléchargement identique sur un second navigateur mobile et révocation immédiate. Le réseau privé est **simulé sur loopback**, avec conservation de l’en-tête Host ; l’autorisation et les octets du ZIP passent par le vrai backend. Ce contrôle ne constitue pas un transfert entre appareils physiques sur Wi-Fi.
 - Interface lisible à 1 440 px et 390 px, administration et audio absents de la surface publique, routes privées exigeant une session.
 
-Rapport et 15 captures : `/tmp/playlist25-browser-z5iWqu`. Ces fichiers sont des artefacts de l’environnement de test, pas des données publiées sur le site.
+Rapport et 17 captures : `/tmp/playlist25-browser-xAl5lD`. Ces fichiers sont des artefacts de l’environnement de test, pas des données publiées sur le site. Le précédent rapport de 51 vérifications et 15 captures reste dans `/tmp/playlist25-browser-z5iWqu`.
 
 ## Gros catalogues, photos et durées : essais ciblés
 
@@ -84,9 +85,11 @@ Le site public est à <https://bouilloon.github.io/Ekoraid/>. Le succès du work
 
 ## Application Windows autonome publiée
 
-La [release `studio-windows-v2026.10.11.1`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1) fournit [Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), de **150 549 087 octets**. Son rapport `windows-smoke.json` et sa somme SHA-256 accompagnent l’archive. Le workflow [38166188497](https://github.com/BOUILLOON/Ekoraid/actions/runs/38166188497), commit `45aae4c2abe3d672e4ee7dbb2e98af740c57ab59`, a construit et réellement exécuté l’application compilée sur **Windows-2025**, avec **Python 3.12.10**.
+La [release `studio-windows-v2026.10.11.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) fournit [Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), de **150 550 195 octets** ; la vérification HEAD du lien public a répondu HTTP **200**. Le workflow [38169483844](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169483844), commit `cc08e9e274ded8510009e02a7e26220d116a5a17`, a construit et réellement exécuté l’application compilée sur **Windows-2025**, avec **Python 3.12.10**. Le rapport public `windows-smoke.json`, joint à la release, confirme ces résultats. SHA-256 de l’archive : `08353a176b714aa0e88f54b196116f1573bccfaead3e6df7c73c16b6ae117bf8`.
 
-Les **10 contrôles ont réussi** : outils et runtimes inclus, yt-dlp, exécutables, fenêtre Tk, démarrage puis arrêt des trois services sans processus restant, réponses HTTP, authentification et CSRF, conversion d’un WAV généré en MP3 avec les vrais FFmpeg/ffprobe, ZIP complet avec M3U8, et séparation des ressources privées du service invités. Aucun audio extérieur n’a été téléchargé et aucune donnée Supabase n’a été écrite par ces essais Windows.
+Les **12 contrôles ont réussi** : outils et runtimes inclus, yt-dlp, exécutables, fenêtre Tk, démarrage puis arrêt des trois services sans processus restant, réponses HTTP, authentification et CSRF, conversion d’un WAV généré en MP3 avec les vrais FFmpeg/ffprobe, ZIP complet avec M3U8, et séparation des ressources privées du service invités. Deux contrôles natifs supplémentaires démarrent le vrai EXE avec des handles standard nuls : premier lancement jusqu’au formulaire, puis lancement avec configuration existante, ouverture des services HTTP et fermeture propre. Ils couvrent le défaut de démarrage `[WinError 6]` que le test avec console de la première version ne reproduisait pas. Aucun audio extérieur n’a été téléchargé et aucune donnée Supabase n’a été écrite par ces essais Windows.
+
+Le ZIP correspond au commit `cc08e9e` ; la mise à jour de détection des doublons du site public est déployée séparément depuis le commit `9ba33077d4976b867b7353b484032a99f5c3c270`. La publication de Pages ne modifie pas le contenu du ZIP déjà construit.
 
 Cette validation porte sur le runner CI. Le démarrage sur le PC Windows 11 de l’organisation et les transferts entre appareils physiques restent à essayer.
 

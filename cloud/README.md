@@ -81,7 +81,7 @@ Le workflow est manuel : un commit ne publie pas automatiquement. Si les workflo
 
 ## 4. Récupérer la collecte sur votre PC
 
-[Téléchargez la version Windows autonome disponible](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), faites **Extraire tout**, puis double-cliquez sur **Studio-Fanny.exe** dans le dossier `Studio-Fanny`. Gardez le dossier extrait entier. Le [guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée) détaille le premier démarrage.
+[Téléchargez la version Windows autonome corrigée](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), disponible dans la [release `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) et vérifiée sans console. Faites **Extraire tout**, puis double-cliquez sur **Studio-Fanny.exe** dans le dossier `Studio-Fanny`. Gardez le dossier extrait entier. Le [guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée) détaille le premier démarrage.
 
 Au premier démarrage, ou après **Arrêter le studio → Configurer la connexion**, renseignez le projet `https://dpcohlyczczaqovblzin.supabase.co`. Cliquez sur **Ouvrir la page de ma clé Supabase**, copiez sa clé **Secret** ou **service_role** dans le champ privé, puis **Enregistrer et ouvrir le studio**. La connexion est vérifiée avant d’être enregistrée ; une erreur conserve la configuration précédente.
 
