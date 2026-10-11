@@ -12,7 +12,7 @@ Pour les **25 ans de Fanny, le 17 octobre 2026 dès 19 h, à la salle des fêtes
 
 ## 1. Installer le studio sur Windows
 
-La version autonome utilise **Studio-Fanny-Windows.zip** dans les [Releases](https://github.com/BOUILLOON/Ekoraid/releases), une fois cette archive publiée. Les notes de version indiquent les vérifications Windows effectuées.
+La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1). Son lancement et la préparation d’un audio généré ont été vérifiés sur Windows en CI.
 
 1. [Téléchargez Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur l’archive, puis **Extraire tout**. Gardez le dossier extrait entier.

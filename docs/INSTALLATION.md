@@ -4,7 +4,7 @@ Le site public <https://bouilloon.github.io/Ekoraid/> collecte les propositions 
 
 ## Windows 11 — version autonome recommandée
 
-Utilisez **Studio-Fanny-Windows.zip** lorsqu’il est disponible dans les [Releases](https://github.com/BOUILLOON/Ekoraid/releases). Les notes de la version indiquent les vérifications Windows effectuées. Le [guide de l’administration](ADMINISTRATION.md) décrit ensuite la sélection et la récupération des musiques.
+La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1). Son lancement et la préparation d’un audio généré ont été vérifiés sur Windows en CI. Le [guide de l’administration](ADMINISTRATION.md) décrit ensuite la sélection et la récupération des musiques.
 
 1. [Téléchargez l’archive Windows](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur le ZIP, puis **Extraire tout**. Ne lancez pas l’application directement depuis l’archive et gardez tout le dossier extrait ensemble.
@@ -255,4 +255,4 @@ Sur Linux, remplacez `.venv\Scripts\python.exe` par `.venv/bin/python`. Consulte
 - **Session expirée / contrôle CSRF** : actualisez la page. Les données déjà enregistrées restent présentes.
 - **Lien public expiré** : redémarrez le tunnel et mettez à jour le lien public ; le lien local est distinct.
 
-Les essais automatisés utilisent des fournisseurs simulés et des fichiers de test autorisés. Les contrôles du paquet Windows et les essais réseau réels, quand ils sont exécutés, sont indiqués dans les notes de version et [le rapport de validation](VALIDATION.md). Aucun téléchargement réel de 10 000 ou 20 000 musiques ni aucun essai de Mixxx avec votre matériel n’est revendiqué. Vérifiez le studio, le transfert sur votre téléphone et la lecture du pack avant la soirée.
+Les essais automatisés utilisent des fournisseurs simulés et des fichiers de test autorisés. Les contrôles réels du paquet Windows et des services publics sont indiqués dans les notes de version et [le rapport de validation](VALIDATION.md). Aucun téléchargement réel de 10 000 ou 20 000 musiques ni aucun essai de Mixxx avec votre matériel n’est revendiqué. Vérifiez le studio, le transfert sur votre téléphone et la lecture du pack avant la soirée.

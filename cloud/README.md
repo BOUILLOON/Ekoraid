@@ -81,7 +81,9 @@ Le workflow est manuel : un commit ne publie pas automatiquement. Si les workflo
 
 ## 4. Récupérer la collecte sur votre PC
 
-Installez la version Windows autonome selon [le guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée). Au premier démarrage, ou après **Arrêter le studio → Configurer la connexion**, renseignez le projet `https://dpcohlyczczaqovblzin.supabase.co`. Cliquez sur **Ouvrir la page de ma clé Supabase**, copiez sa clé **Secret** ou **service_role** dans le champ privé, puis **Enregistrer et ouvrir le studio**. La connexion est vérifiée avant d’être enregistrée ; une erreur conserve la configuration précédente.
+[Téléchargez la version Windows autonome disponible](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), faites **Extraire tout**, puis double-cliquez sur **Studio-Fanny.exe** dans le dossier `Studio-Fanny`. Gardez le dossier extrait entier. Le [guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée) détaille le premier démarrage.
+
+Au premier démarrage, ou après **Arrêter le studio → Configurer la connexion**, renseignez le projet `https://dpcohlyczczaqovblzin.supabase.co`. Cliquez sur **Ouvrir la page de ma clé Supabase**, copiez sa clé **Secret** ou **service_role** dans le champ privé, puis **Enregistrer et ouvrir le studio**. La connexion est vérifiée avant d’être enregistrée ; une erreur conserve la configuration précédente.
 
 La clé reste sur le PC. Ne la copiez jamais dans le site, les variables publiques du workflow ou une capture d’écran. Les clés secret modernes `sb_secret_…` et les clés JWT service_role anciennes sont prises en charge. Au lancement, le studio récupère la collecte avant d’ouvrir le navigateur, sauf en mode hors ligne, et ne prépare aucun audio automatiquement.
 
