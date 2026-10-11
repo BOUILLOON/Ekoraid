@@ -56,7 +56,7 @@ Après `init`, ajoutez les paramètres souhaités de [.env.example](../.env.exam
 
 | Paramètre | Exemple / rôle |
 | --- | --- |
-| `EVENT_NAME` | `"La playlist des 25 ans"` : valeur initiale du nom. |
+| `EVENT_NAME` | `"Les 25 ans de Fanny"` : valeur initiale du nom. |
 | `DATA_DIR` | `data` ou `D:/Anniversaire25/donnees` : base, audio, temporaires et exports. |
 | `GUEST_PORT` | `8000`, différent du port administrateur. |
 | `ADMIN_PORT` | `8001`. `ADMIN_HOST` reste `127.0.0.1`. |
@@ -92,6 +92,29 @@ N’exposez pas `8001`. Un Quick Tunnel n’est pas un hébergement permanent : 
 
 Le QR code public utilise le lien configuré ; remplacez ce lien et régénérez le QR code si l’adresse du tunnel change. Le QR code local utilise `LOCAL_URL` et nécessite le Wi-Fi local. Un lien Internet public ne fonctionnera pas dans une salle sans Internet.
 
+## Fanny : sélectionner et récupérer les musiques dans le studio
+
+Le studio privé s’ouvre **sur votre PC** à <http://127.0.0.1:8001>, avec le mot de passe choisi par `configure-admin`. Aucun compte invité n’est nécessaire pour administrer. Le site public Pages reçoit les propositions PC éteint ; pour préparer l’audio, lancez l’application sur le PC et gardez son lanceur ouvert.
+
+1. Dans **Réglages & diagnostics**, cliquez sur **Récupérer les propositions du site public**. Ce bouton récupère les idées et les votes ; il ne prépare pas encore d’audio. Consultez le [guide cloud](../cloud/README.md) si la connexion Supabase n’est pas configurée sur votre PC.
+2. Dans **Propositions**, vérifiez les versions et utilisez **Modifier** pour corriger les informations ou associer un lien YouTube à une demande textuelle. Les noms de chaînes ne constituent pas une identification garantie de l’artiste.
+3. Cliquez sur **Tout sélectionner** pour les lignes affichées, ou sur **Sélectionner tous les validés**. Les compteurs indiquent les sources distinctes, les fichiers prêts et les demandes encore sans lien. Les propositions retirées par leur auteur restent dans l’historique mais ne peuvent pas être sélectionnées ou réactivées.
+4. Cliquez sur **Préparer les fichiers de la sélection**, confirmez vos droits d’usage, puis suivez **Téléchargements**. L’ajout à la file ne crée pas immédiatement un ZIP. Les morceaux deviennent prêts après vérification de leur fichier.
+5. Cliquez sur **Récupérer les fichiers prêts en ZIP**, choisissez les fichiers dans **Packs & exports**, puis **Créer le ZIP de X fichiers**. Le pack utilise uniquement des fichiers effectivement présents. Vous pouvez récupérer une partie prête pendant que d’autres morceaux attendent ou sont en erreur. Pour respecter votre sélection initiale, utilisez **Récupérer les fichiers déjà prêts** depuis Propositions.
+6. Une fois le ZIP créé, cliquez sur **Télécharger le ZIP sur cet appareil**. Le navigateur du PC l’enregistre dans Téléchargements ou vous propose un dossier. Si vous voulez le récupérer sur un téléphone ou une tablette, utilisez le partage Wi-Fi décrit ci-dessous.
+
+Pour choisir les fichiers déjà importés ou téléchargés, **Bibliothèque locale → Récupérer mes fichiers en ZIP** ouvre directement la sélection du pack. Les fichiers qui échouent restent signalés dans Téléchargements ; corrigez la cause avant de réessayer. Le [guide de l’administration](ADMINISTRATION.md) décrit chaque écran.
+
+## Récupérer le ZIP sur un téléphone ou une tablette
+
+1. Connectez le PC et le téléphone ou la tablette **au même Wi-Fi**. Gardez le PC et l’application allumés.
+2. Après avoir créé votre ZIP dans **Packs & exports**, cliquez sur **Partager sur mon Wi-Fi**.
+3. Choisissez dans la liste l’adresse de la connexion Wi-Fi du PC, puis **Créer le QR code de partage**. La liste contient les interfaces privées actives compatibles ; le studio ne partage aucun fichier avant cette action.
+4. Scannez le QR code avec le téléphone ou la tablette. La page locale ouverte propose **Télécharger le ZIP sur cet appareil**. Le navigateur de cet appareil gère l’emplacement du fichier ; consultez son dossier Téléchargements ou son application Fichiers.
+5. Une fois le transfert terminé, cliquez sur **Fermer le partage** dans le studio. Cela révoque le lien immédiatement. Fermer le dialogue le révoque également ; sinon il expire automatiquement dix minutes après sa création.
+
+Le lien privé donne accès uniquement à ce ZIP. Il utilise le service invités sur le réseau local et ne donne aucun accès au studio, qui reste sur `127.0.0.1:8001`. Il ne passe pas par GitHub Pages ou par un tunnel Internet. Les téléphones en données mobiles ne peuvent pas l’utiliser. Si le réseau Wi-Fi isole les appareils ou si le pare-feu bloque le service invités, récupérez le ZIP sur le PC et copiez-le par USB, ou testez le réseau local avant la soirée. N’ouvrez pas le port administrateur sur le réseau.
+
 ## Importer une playlist entière
 
 Exemple dans l’administration :
@@ -100,7 +123,7 @@ Exemple dans l’administration :
 2. Cliquez sur **Analyser**. L’audio n’est pas téléchargé pendant cette étape. Vérifiez les titres, l’ordre, les éléments indisponibles et les avertissements.
 3. Si votre URL comporte à la fois `v=` et `list=`, choisissez explicitement **ce morceau seulement** ou **toute la playlist**.
 4. Sélectionnez tout ou décochez les versions indésirables. Une analyse limitée ou interrompue est signalée comme incomplète : augmentez la limite dans les réglages puis analysez de nouveau si nécessaire.
-5. Confirmez votre sélection et vos droits d’usage avant le lancement du lot. Cette confirmation ne vérifie pas juridiquement les droits.
+5. Cliquez sur **Importer et préparer les fichiers**, puis confirmez votre sélection et vos droits d’usage avant le lancement du lot. Cette confirmation ne vérifie pas juridiquement les droits. **Enregistrer sans télécharger** permet de conserver la playlist pour plus tard.
 6. Consultez **Téléchargements**. Le worker traite un seul morceau à la fois, conserve la progression et les erreurs, et vérifie chaque fichier avant de le déclarer disponible. Réessayez uniquement les erreurs lorsque leur cause a été corrigée.
 
 Vous pouvez également coller plusieurs liens individuels, un par ligne, ou choisir un fichier TXT contenant ces liens. Les chaînes, radios potentiellement infinies et directs en cours sont refusés. Une proposition d’invité ne lance aucun téléchargement.
@@ -109,7 +132,7 @@ Vous pouvez fermer votre navigateur pendant une tâche : le worker continue tant
 
 ## Préparer le pack puis l’ouvrir dans Mixxx
 
-Dans **Bibliothèque**, importez aussi vos propres fichiers audio si nécessaire. L’application copie les fichiers sans déplacer ni supprimer les originaux. Choisissez ensuite les morceaux effectivement disponibles dans **Exports → Préparer le pack pour Mixxx**.
+Dans **Bibliothèque locale**, importez aussi vos propres fichiers audio si nécessaire. L’application copie les fichiers sans déplacer ni supprimer les originaux. Choisissez ensuite les morceaux effectivement disponibles dans **Packs & exports → Créer le ZIP de X fichiers**.
 
 - Sur votre PC, vous pouvez conserver le dossier d’export sans ZIP.
 - Vous pouvez aussi récupérer l’archive ZIP depuis l’administration et la décompresser dans le dossier de votre choix.
@@ -119,7 +142,7 @@ Conservez la structure du pack quand vous le déplacez : les chemins des M3U8 so
 
 Le choix MP3 favorise la compatibilité. Une conversion à un débit élevé n’améliore pas la qualité d’origine. Le profil `source` permet de conserver l’audio source lorsqu’il convient à votre lecteur.
 
-Les téléchargements sont écrits sur **la machine qui exécute le backend**. Un ZIP récupéré dans le navigateur est enregistré sur votre PC selon les réglages du navigateur ; un serveur distant ne peut pas écrire directement dans votre dossier Musique.
+La préparation écrit les fichiers audio sur **le PC qui exécute l’application**. Un ZIP récupéré dans le navigateur est enregistré sur **l’appareil qui ouvre le lien**, selon les réglages du navigateur. Le partage Wi-Fi permet donc de le recevoir sur un téléphone ou une tablette ; le site Pages seul ne prépare pas l’audio.
 
 ## Linux et Docker — options secondaires
 

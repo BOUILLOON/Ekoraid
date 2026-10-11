@@ -18,6 +18,7 @@ const context = {
     let data = {items: []}, status = 200;
     if (url.endsWith("playlist25_session")) data = {guest: null, settings: {}};
     if (url.endsWith("playlist25_propose")) data = {item: {id: 1, video_id: body.p_video_id}};
+    if (url.endsWith("playlist25_withdraw")) data = {id: body.p_proposal_id, withdrawn: true, state: "archived"};
     if (url.endsWith("/music-search")) {status = searchStatus; data = status === 200 ? {items: [{video_id: "abcDEF_1234", title: "Fixture"}]} : {error: "YouTube refuse la recherche. Utilisez un lien."};}
     return {ok: status === 200, status, json: async () => data};
   },
@@ -38,6 +39,13 @@ assert.equal(calls.at(-1).body.p_title, "Titre choisi");
 for (const url of ["http://127.0.0.1/private", "https://youtube.com.evil.example/watch?v=abcDEF_1234", "https://evil@youtube.com/watch?v=abcDEF_1234", "file:///etc/passwd", "https://youtube.com/playlist?list=PL-demo", "https://youtube.com/watch?v=abcDEF_1234&v=otherABC123"])
   await assert.rejects(provider.request("/api/proposals", {method: "POST", body: {kind: "youtube", url}}));
 await assert.rejects(provider.request("/api/downloads", {method: "POST", body: {source_ids: [1]}}));
+const withdrawn = await provider.request("/api/proposals/1/withdraw", {method: "POST", body: {nickname: "Camille"}});
+assert.equal(withdrawn.id, 1);
+assert.equal(withdrawn.withdrawn, true);
+assert.equal(calls.at(-1).body.p_token, token);
+assert.deepEqual(Object.keys(calls.at(-1).body).sort(), ["p_proposal_id", "p_token"]);
+await assert.rejects(provider.request("/api/proposals/9007199254740993/withdraw", {method: "POST"}));
+await assert.rejects(provider.request("/api/proposals/1/withdraw", {method: "DELETE"}));
 const search = await provider.request("/api/search?q=Dalida");
 assert.equal(search.items.length, 1);
 assert.equal(calls.at(-1).body.guest_token, token);
@@ -50,4 +58,4 @@ await assert.rejects(provider.request("/api/session"), /clé secrète/);
 assert.equal(calls.length, before);
 context.window.PLAYLIST_CLOUD = {};
 assert.equal(provider.enabled(), false);
-console.log("PASS: browser token persistence, URL normalization/rejections, guest-only routing, real search transport/fallback, secret-key rejection.");
+console.log("PASS: browser token persistence, URL normalization/rejections, guest-only routing/withdrawal token transport, real search transport/fallback, secret-key rejection.");

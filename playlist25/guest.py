@@ -48,7 +48,7 @@ _VISIBLE_STATES = {"pending", "approved"}
 _PUBLIC_FIELDS = (
     "id", "source_id", "nickname", "state", "sort_order", "title", "artist",
     "channel", "duration", "thumbnail", "url", "video_id", "status", "votes",
-    "voted", "created_at",
+    "voted", "created_at", "mine",
 )
 _EXTERNAL_SLOTS = threading.BoundedSemaphore(4)
 
@@ -171,12 +171,14 @@ def _public(item: dict) -> dict:
     public = {key: item.get(key) for key in _PUBLIC_FIELDS}
     public["votes"] = int(public.get("votes") or 0)
     public["voted"] = bool(public.get("voted"))
+    public["mine"] = bool(public.get("mine"))
     public["thumbnail"] = _thumbnail(public.get("thumbnail"))
     return public
 
 
 def _proposals(conn, guest_id: str | None = None) -> list[dict]:
-    return [dict(row) for row in db.list_proposals(conn, guest_id=guest_id)
+    return [dict(row, mine=bool(guest_id and row["guest_id"] == guest_id))
+            for row in db.list_proposals(conn, guest_id=guest_id)
             if row["state"] in _VISIBLE_STATES]
 
 
@@ -194,6 +196,20 @@ def _manual_duplicate(conn, items: list[dict], title: str, artist: str) -> dict 
             and _normal(item.get("artist") or "") == artist_key
         ):
             return item
+    return None
+
+
+def _withdrawn_manual_source(conn, guest_id: str, title: str, artist: str):
+    """Reuse an owner's exact text source without erasing the archived proposal."""
+    rows = conn.execute(
+        "SELECT s.id,s.title,s.artist FROM sources s JOIN proposals p ON p.source_id=s.id "
+        "WHERE p.guest_id=? AND p.withdrawn_at IS NOT NULL AND s.video_id IS NULL "
+        "ORDER BY p.id DESC", (guest_id,),
+    )
+    title_key, artist_key = _normal(title), _normal(artist)
+    for row in rows:
+        if _normal(row["title"]) == title_key and _normal(row["artist"]) == artist_key:
+            return row
     return None
 
 
@@ -405,10 +421,11 @@ def create_guest_app(cfg) -> FastAPI:
                 duplicate = _same_source(items, known["id"] if known else None)
             else:
                 duplicate = _manual_duplicate(conn, items, entry["title"], entry.get("artist", ""))
+                known = _withdrawn_manual_source(conn, guest["id"], entry["title"], entry.get("artist", ""))
             if duplicate:
                 return {"duplicate": _public(duplicate), "similar": [],
                         "message": "Ce morceau est déjà proposé. Tu peux voter pour lui."}
-            count = conn.execute("SELECT COUNT(*) FROM proposals WHERE guest_id=?",
+            count = conn.execute("SELECT COUNT(*) FROM proposals WHERE guest_id=? AND withdrawn_at IS NULL",
                                  (guest["id"],)).fetchone()[0]
             maximum = int(settings["max_proposals"])
             if count >= maximum:
@@ -418,10 +435,10 @@ def create_guest_app(cfg) -> FastAPI:
             if total >= int(db.get_setting(conn, "max_total_proposals", 5000)):
                 raise HTTPException(429, "La liste a atteint sa capacité. Contacte l’administrateur.")
             source_id = known["id"] if known else db.upsert_source(conn, entry)
-            # A rejected or archived submission from this guest stays moderated; there
-            # must be no reactivation via the public endpoint or unique-key failure.
+            # Administrator moderation remains effective. A voluntary withdrawal
+            # permits a fresh proposal while its archived history and votes survive.
             previous = conn.execute(
-                "SELECT state FROM proposals WHERE source_id=? AND guest_id=?",
+                "SELECT state FROM proposals WHERE source_id=? AND guest_id=? AND withdrawn_at IS NULL",
                 (source_id, guest["id"]),
             ).fetchone()
             if previous:
@@ -461,6 +478,34 @@ def create_guest_app(cfg) -> FastAPI:
             votes = conn.execute("SELECT COUNT(*) FROM votes WHERE proposal_id=?", (proposal_id,)).fetchone()[0]
             conn.commit()
             return {"votes": votes, "voted": payload.active}
+
+    @app.post("/api/proposals/{proposal_id}/withdraw")
+    def withdraw(proposal_id: int, request: Request):
+        require_csrf(request)
+        rate_limit(request, "withdraw", 30)
+        if not 0 < proposal_id < 2 ** 63:
+            raise HTTPException(404, "Cette proposition n’est pas disponible.")
+        with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # An existing owner may correct a mistake even after participation
+            # closes or individual invitations become required.
+            guest = _guest(conn, request)
+            proposal = conn.execute(
+                "SELECT guest_id,state,withdrawn_at FROM proposals WHERE id=?", (proposal_id,)
+            ).fetchone()
+            if not proposal or proposal["guest_id"] != guest["id"]:
+                raise HTTPException(404, "Cette proposition n’est pas disponible.")
+            if proposal["state"] not in _VISIBLE_STATES and not proposal["withdrawn_at"]:
+                raise HTTPException(404, "Cette proposition n’est pas disponible.")
+            if proposal["state"] != "archived" or not proposal["withdrawn_at"]:
+                conn.execute(
+                    "UPDATE proposals SET state='archived',withdrawn_at=COALESCE(withdrawn_at,?) "
+                    "WHERE id=? AND guest_id=?",
+                    (db.now(), proposal_id, guest["id"]),
+                )
+            conn.commit()
+            return {"id": proposal_id, "withdrawn": True,
+                    "message": "Ta proposition a été retirée de la liste."}
 
     @app.get("/api/qr")
     def qr(request: Request, scope: Literal["local", "public"] = "local"):

@@ -50,7 +50,7 @@ def build(url: str, public_key: str, output: Path):
             raise ValueError(f"Ressource locale manquante/non autorisée : {name}")
     (output / "static").mkdir(parents=True, exist_ok=True)
     page = (static / "guest.html").read_text(encoding="utf-8")
-    policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src " + url.rstrip("/") + "; object-src 'none'; base-uri 'none'; form-action 'none'"
+    policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src " + url.rstrip("/") + "; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'none'; form-action 'none'"
     page = page.replace("<head>", '<head>\n  <meta http-equiv="Content-Security-Policy" content="' + policy + '">', 1)
     (output / "index.html").write_text(page, encoding="utf-8")
     for name in PUBLIC_ASSETS:

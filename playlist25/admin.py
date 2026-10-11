@@ -50,6 +50,11 @@ class ProposalPatch(Input):
     sort_order: int | None = Field(default=None, ge=-1000000, le=1000000)
 
 
+class ProposalBatchPatch(Input):
+    proposal_ids: list[StrictInt] = Field(min_length=1, max_length=10000)
+    state: str
+
+
 class MergeInput(Input):
     keep_id: StrictInt = Field(gt=0)
     merge_id: StrictInt = Field(gt=0)
@@ -461,6 +466,25 @@ def create_admin_app(cfg: Settings) -> FastAPI:
         with _connection(cfg) as conn:
             return {"items": db.list_proposals(conn, include_hidden=True)}
 
+    @app.patch("/api/proposals", dependencies=modifying)
+    def proposals_update(payload: ProposalBatchPatch) -> dict[str, Any]:
+        if payload.state not in ("pending", "approved", "rejected", "archived"):
+            raise HTTPException(422, "État de modération invalide.")
+        if any(proposal_id <= 0 for proposal_id in payload.proposal_ids):
+            raise HTTPException(422, "Identifiant de proposition invalide.")
+        ids = list(dict.fromkeys(payload.proposal_ids))
+        with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(f"SELECT id,withdrawn_at FROM proposals WHERE id IN ({placeholders})", ids).fetchall()
+            if len(rows) != len(ids):
+                raise HTTPException(404, "Une proposition de la sélection est introuvable. Actualisez la liste.")
+            if payload.state != "archived" and any(row["withdrawn_at"] for row in rows):
+                raise HTTPException(409, "Une proposition a été retirée par l’invité·e. Son retrait reste enregistré ; aucune proposition de cette sélection n’a été modifiée.")
+            conn.execute(f"UPDATE proposals SET state=? WHERE id IN ({placeholders})", [payload.state, *ids])
+            conn.commit()
+            return {"count": len(ids), "state": payload.state}
+
     @app.patch("/api/proposals/{proposal_id}", dependencies=modifying)
     def proposal_update(proposal_id: int, payload: ProposalPatch) -> dict[str, Any]:
         changes = payload.model_dump(exclude_unset=True)
@@ -475,9 +499,13 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                     raise HTTPException(422, "Le titre est obligatoire.")
         warnings: list[str] = []
         with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             proposal = conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
             if not proposal:
                 raise HTTPException(404, "Proposition introuvable.")
+            if ("withdrawn_at" in proposal.keys() and proposal["withdrawn_at"]
+                    and changes.get("state", "archived") != "archived"):
+                raise HTTPException(409, "Cette proposition a été retirée par l’invité·e. Son retrait reste enregistré ; ses métadonnées peuvent encore être corrigées.")
             source_id = proposal["source_id"]
             if "url" in changes:
                 _online(conn)

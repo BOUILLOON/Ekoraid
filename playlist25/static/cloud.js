@@ -128,6 +128,12 @@
         p_title: body.title || null, p_artist: body.artist || "",
         p_video_id: body.kind === "youtube" ? youtubeId(body.url) : null });
     }
+    const withdrawal = /^\/api\/proposals\/([1-9][0-9]*)\/withdraw$/.exec(route);
+    if (method === "POST" && withdrawal) {
+      const id = Number(withdrawal[1]);
+      if (!Number.isSafeInteger(id)) fail("Proposition invalide.", 422);
+      return rpc("playlist25_withdraw", {p_token: token, p_proposal_id: id});
+    }
     const vote = /^\/api\/proposals\/([1-9][0-9]*)\/vote$/.exec(route);
     if (method === "POST" && vote) {
       if (typeof body.active !== "boolean") fail("Vote invalide.", 422);

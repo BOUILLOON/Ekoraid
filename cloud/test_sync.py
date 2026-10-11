@@ -69,6 +69,57 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM sources").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM guests").fetchone()[0], 1)
 
+    def test_remote_withdrawal_archives_local_and_readd_keeps_distinct_history(self):
+        self.conn.execute("DELETE FROM votes")
+        self.conn.execute("DELETE FROM proposals")
+        data = snapshot()
+        cloud_sync.import_snapshot(self.cfg, self.conn, data)
+        old_local = self.conn.execute("SELECT local_id FROM cloud_map WHERE kind='proposal' AND remote_id='testing-project:202'").fetchone()[0]
+        self.conn.execute("UPDATE proposals SET state='approved' WHERE id=?", (old_local,))
+        data["proposals"][1].update(state="archived", withdrawn_at=DATE)
+        data["proposals"].append({"id": 203, "source_id": 102, "guest_id": GB, "state": "pending", "sort_order": 0, "created_at": DATE})
+        cloud_sync.import_snapshot(self.cfg, self.conn, data)
+        old = dict(self.conn.execute("SELECT * FROM proposals WHERE id=?", (old_local,)).fetchone())
+        new_local = self.conn.execute("SELECT local_id FROM cloud_map WHERE kind='proposal' AND remote_id='testing-project:203'").fetchone()[0]
+        new = dict(self.conn.execute("SELECT * FROM proposals WHERE id=?", (new_local,)).fetchone())
+        self.assertNotEqual(str(old_local), str(new_local))
+        self.assertEqual((old["state"], old["withdrawn_at"]), ("archived", DATE))
+        self.assertEqual((new["state"], new["withdrawn_at"], new["source_id"]), ("pending", None, old["source_id"]))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM votes WHERE proposal_id=?", (old_local,)).fetchone()[0], 2)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM votes WHERE proposal_id=?", (new_local,)).fetchone()[0], 0)
+        captured = []
+        def fake_rpc(cfg, name, body):
+            captured.append(body)
+            return {"updated": len(body["p_updates"])}
+        with patch.object(cloud_sync, "_rpc", fake_rpc):
+            cloud_sync.push(self.cfg, self.conn)
+        updates = {item["id"]: item for item in captured[0]["p_updates"]}
+        self.assertEqual(updates[202]["state"], "archived")
+        self.assertEqual(updates[203]["state"], "pending")
+        self.assertNotIn("merge_into", updates[202])
+        # An older snapshot cannot reset the sticky local withdrawal audit marker.
+        cloud_sync.import_snapshot(self.cfg, self.conn, snapshot())
+        self.assertEqual(self.conn.execute("SELECT withdrawn_at FROM proposals WHERE id=?", (old_local,)).fetchone()[0], DATE)
+
+    def test_withdrawn_merged_secondary_does_not_hide_active_canonical(self):
+        data = snapshot()
+        cloud_sync.import_snapshot(self.cfg, self.conn, data)
+        self.conn.execute("UPDATE cloud_map SET local_id=? WHERE kind='proposal'", (str(self.pid),))
+        data["proposals"][0].update(state="archived", withdrawn_at=DATE)
+        cloud_sync.import_snapshot(self.cfg, self.conn, data)
+        local = self.conn.execute("SELECT state,withdrawn_at FROM proposals WHERE id=?", (self.pid,)).fetchone()
+        self.assertEqual((local["state"], local["withdrawn_at"]), ("approved", None))
+        captured = []
+        def fake_rpc(cfg, name, body):
+            captured.append(body)
+            return {"updated": len(body["p_updates"])}
+        with patch.object(cloud_sync, "_rpc", fake_rpc):
+            cloud_sync.push(self.cfg, self.conn)
+        updates = {item["id"]: item for item in captured[0]["p_updates"]}
+        self.assertEqual(updates[202]["state"], "approved")
+        self.assertEqual(updates[201]["state"], "archived")
+        self.assertNotIn("merge_into", updates[201])
+
     def test_explicit_publish_archives_merged_remote_entries_and_sends_no_secret_or_file(self):
         cloud_sync.import_snapshot(self.cfg, self.conn, snapshot())
         self.conn.execute("UPDATE cloud_map SET local_id=? WHERE kind='proposal'", (str(self.pid),))

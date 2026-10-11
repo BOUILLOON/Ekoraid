@@ -2,7 +2,7 @@
 
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = { session: null, items: [], mine: false, query: "", sort: "popular", identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null };
+  const state = { session: null, items: [], mine: false, query: "", sort: "popular", identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false };
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
     const node = document.createElement(tag);
@@ -34,6 +34,40 @@
   function toast(text) { const node = el("div", "toast", text); $("#toasts").append(node); window.setTimeout(() => node.remove(), 4500); }
   function duration(seconds) { if (!Number.isFinite(Number(seconds)) || seconds == null) return "Durée non renseignée"; const n = Math.floor(Number(seconds)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; }
   function nicknameInitial(nickname) { return Array.from(nickname || "?")[0].toUpperCase(); }
+  function youtubeVideoId(item) {
+    if (typeof item.video_id === "string" && /^[A-Za-z0-9_-]{11}$/.test(item.video_id)) return item.video_id;
+    const canonical = /^https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11})$/.exec(item.url || "");
+    return canonical?.[1] || null;
+  }
+  function clearPreview() { $("#preview-player").replaceChildren(); }
+  function openPreview(item) {
+    const id = youtubeVideoId(item);
+    if (!id) return;
+    if (state.session?.settings?.offline_mode) { toast("L’écoute YouTube nécessite Internet et reste désactivée pendant la soirée hors ligne."); return; }
+    clearPreview();
+    $("#preview-heading").textContent = item.title || "Écouter le morceau";
+    $("#preview-fallback").href = `https://www.youtube.com/watch?v=${id}`;
+    const player = el("iframe");
+    // No player exists or connects to YouTube before an explicit preview click.
+    player.src = `https://www.youtube-nocookie.com/embed/${id}`;
+    player.title = `Lecteur YouTube : ${item.title || "Morceau"}`;
+    player.loading = "lazy";
+    player.allow = "autoplay; encrypted-media; picture-in-picture";
+    player.allowFullscreen = true;
+    player.referrerPolicy = "strict-origin-when-cross-origin";
+    $("#preview-player").append(player);
+    if (!$("#preview-dialog").open) $("#preview-dialog").showModal();
+  }
+  function previewButton(item) {
+    const id = youtubeVideoId(item);
+    if (!id) return null;
+    const button = el("button", "button subtle small preview-button", "Écouter");
+    button.type = "button"; button.dataset.previewId = id;
+    button.setAttribute("aria-label", `Écouter ${item.title || "ce morceau"}`);
+    button.addEventListener("click", () => openPreview(item));
+    if (state.session?.settings?.offline_mode) { button.disabled = true; button.textContent = "Écoute indisponible hors ligne"; button.title = "Un accès à Internet est nécessaire pour écouter une vidéo YouTube."; }
+    return button;
+  }
   function showIdentity() { $("#nickname-input").value = state.session?.guest?.nickname || ""; $("#identity-dialog").showModal(); window.setTimeout(() => $("#nickname-input").focus(), 20); }
   async function ensureIdentity() {
     if (state.session?.guest) return true;
@@ -43,10 +77,10 @@
   function syncSession() {
     const settings = state.session?.settings || {};
     const guest = state.session?.guest;
-    const title = settings.event_name || "La playlist des 25 ans";
-    if (title === "La playlist des 25 ans") $("#event-title").replaceChildren(document.createTextNode("La playlist"), el("br"), document.createTextNode("des "), el("span", "", "25 ans."));
+    const title = settings.event_name || "Les 25 ans de Fanny";
+    if (["La playlist des 25 ans", "Les 25 ans de Fanny", "La playlist des 25 ans de Fanny"].includes(title)) $("#event-title").replaceChildren(document.createTextNode("Les 25 ans"), el("br"), el("span", "birthday-name", "de Fanny."));
     else $("#event-title").textContent = title;
-    document.title = title;
+    document.title = `${title === "La playlist des 25 ans" ? "Les 25 ans de Fanny" : title} · La playlist`;
     $("#guest-name").textContent = guest?.nickname || "Choisir mon pseudo";
     $("#guest-avatar").textContent = nicknameInitial(guest?.nickname);
     $("#quota-label").textContent = `${settings.max_proposals || 10} idées par invité`;
@@ -65,6 +99,8 @@
     }
     $("#search-input").disabled = !!settings.offline_mode;
     $("#search-form button").disabled = $("#search-input").disabled;
+    if (settings.offline_mode) { clearPreview(); if ($("#preview-dialog").open) $("#preview-dialog").close(); }
+    document.querySelectorAll("[data-preview-id]").forEach((button) => { button.disabled = !!settings.offline_mode; button.textContent = settings.offline_mode ? "Écoute indisponible hors ligne" : "Écouter"; button.title = settings.offline_mode ? "Un accès à Internet est nécessaire pour écouter une vidéo YouTube." : "Ouvrir le lecteur YouTube de ce morceau."; });
   }
   function setEntry(name) {
     window.clearTimeout(state.searchTimer); state.searchController?.abort(); state.searchSerial++;
@@ -96,7 +132,9 @@
         const source = el("a", "result-source", "Voir sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer";
         // Source links come from the server’s canonical YouTube parser, never an arbitrary thumbnail URL.
         if (/^https:\/\/(www\.)?youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(item.url || "")) description.append(source);
-        const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); row.append(image, description, add); results.append(row);
+        const actions = el("div", "search-result-actions"), preview = previewButton(item);
+        if (preview) actions.append(preview);
+        const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); actions.append(add); row.append(image, description, actions); results.append(row);
       });
       if (!data.items?.length) youtubeFallback(query);
     } catch (error) {
@@ -141,10 +179,46 @@
     } catch (error) { toast(error.message); }
     finally { button.disabled = false; }
   }
+  function requestWithdrawal(item) {
+    if (item.mine !== true) return;
+    state.withdrawing = item;
+    $("#withdraw-title").textContent = item.title || "Votre morceau";
+    message($("#withdraw-feedback"), "");
+    $("#withdraw-confirm").disabled = false;
+    $("#withdraw-confirm").textContent = "Retirer ma proposition";
+    $("#withdraw-dialog").showModal();
+    // The safe choice gets initial focus; the removal always needs a second action.
+    $("#withdraw-cancel").focus();
+  }
+  async function withdrawProposal() {
+    if (!state.withdrawing || state.withdrawalPending) return;
+    const item = state.withdrawing;
+    state.withdrawalPending = true;
+    $("#withdraw-confirm").disabled = $("#withdraw-cancel").disabled = true;
+    $("#withdraw-dialog .modal-close").disabled = true;
+    $("#withdraw-confirm").textContent = "Retrait en cours…";
+    message($("#withdraw-feedback"), "Retrait de votre proposition…");
+    try {
+      await api(`/api/proposals/${item.id}/withdraw`, { method: "POST", body: {} });
+      state.items = state.items.filter((track) => track.id !== item.id);
+      renderProposals();
+      $("#withdraw-dialog").close();
+      toast("Votre proposition a été retirée de la playlist.");
+      $(state.mine ? "#filter-mine" : "#filter-all").focus();
+      try { await loadProposals(); }
+      catch { toast("Le retrait est enregistré. Actualisez la playlist quand la connexion revient."); }
+    } catch (error) { message($("#withdraw-feedback"), error.message, "error"); }
+    finally {
+      state.withdrawalPending = false;
+      $("#withdraw-confirm").disabled = $("#withdraw-cancel").disabled = false;
+      $("#withdraw-dialog .modal-close").disabled = false;
+      $("#withdraw-confirm").textContent = "Retirer ma proposition";
+      if (!$("#withdraw-dialog").open) state.withdrawing = null;
+    }
+  }
   function renderProposals() {
     const query = state.query.trim().toLocaleLowerCase("fr");
-    const guest = state.session?.guest;
-    const mine = state.items.filter((item) => item.mine || item.is_mine || (guest && item.nickname === guest.nickname && item.guest_id === guest.id));
+    const mine = state.items.filter((item) => item.mine === true);
     let items = (state.mine ? mine : state.items).filter((item) => [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)));
     items = items.slice().sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
     $("#stat-tracks").textContent = state.items.length;
@@ -163,9 +237,20 @@
       if (!item.url) details.append(el("span", "mini-tag", "Une idée à retrouver"));
       else if (item.state === "approved") details.append(el("span", "mini-tag approved", "Validé"));
       content.append(details);
+      const preview = previewButton(item);
+      if (preview) {
+        const sourceActions = el("div", "track-source-actions"), source = el("a", "result-source", "Voir sur YouTube →");
+        source.href = `https://www.youtube.com/watch?v=${youtubeVideoId(item)}`; source.target = "_blank"; source.rel = "noopener noreferrer";
+        sourceActions.append(preview, source); content.append(sourceActions);
+      }
       const bottom = el("div", "track-bottom"); const author = el("span", "track-author"); author.append(el("span", "tiny-avatar", nicknameInitial(item.nickname)), document.createTextNode(item.nickname || "Organisation"));
       const button = el("button", `vote-button${item.voted ? " voted" : ""}`); button.type = "button"; button.setAttribute("aria-label", `${item.voted ? "Retirer mon vote pour" : "Voter pour"} ${item.title}`); button.setAttribute("aria-pressed", String(!!item.voted)); button.append(el("span", "heart", item.voted ? "♥" : "♡"), el("span", "", String(item.votes || 0))); button.disabled = state.session?.settings?.votes_open === false; button.addEventListener("click", () => voteFor(item, button)); bottom.append(author, button);
-      card.append(visual, content, bottom); list.append(card);
+      card.append(visual, content, bottom);
+      if (item.mine === true) {
+        const ownActions = el("div", "track-own-actions");
+        const withdraw = el("button", "withdraw-button", "Retirer ma proposition"); withdraw.type = "button"; withdraw.dataset.withdrawId = String(item.id); withdraw.setAttribute("aria-label", `Retirer ma proposition : ${item.title}`); withdraw.addEventListener("click", () => requestWithdrawal(item)); ownActions.append(withdraw); card.append(ownActions);
+      }
+      list.append(card);
     });
     $("#catalogue-empty").classList.toggle("hidden", items.length > 0);
     $("#catalogue-empty h3").textContent = state.items.length ? "Aucun morceau pour cette recherche." : "Le premier morceau, c’est peut-être le vôtre.";
@@ -174,12 +259,7 @@
   async function loadProposals() {
     const data = await api("/api/proposals?sort=popular");
     state.items = data.items || [];
-    // The public API exposes only a boolean ownership marker, never another guest’s identifier.
-    if (state.session?.guest) {
-      const own = await api("/api/proposals?mine=true&sort=recent");
-      const ids = new Set((own.items || []).map((item) => item.id));
-      state.items.forEach((item) => { item.mine = ids.has(item.id); });
-    }
+    // Only the server’s boolean marker grants owner actions; nicknames are display names.
     renderProposals();
   }
   document.querySelectorAll("[data-entry]").forEach((button) => {
@@ -193,6 +273,13 @@
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.closeDialog}`).close()));
   $("#identity-dialog").addEventListener("close", () => { if (state.identityResolve) { state.identityResolve(!!state.session?.guest); state.identityResolve = null; } });
   $("#identity-button").addEventListener("click", showIdentity);
+  $("#withdraw-confirm").addEventListener("click", withdrawProposal);
+  $("#withdraw-cancel").addEventListener("click", () => { if (!state.withdrawalPending) $("#withdraw-dialog").close(); });
+  $("#withdraw-dialog").addEventListener("cancel", (event) => { if (state.withdrawalPending) event.preventDefault(); });
+  $("#withdraw-dialog").addEventListener("close", () => { if (!state.withdrawalPending) state.withdrawing = null; });
+  $("#organisation-button").addEventListener("click", () => $("#organisation-dialog").showModal());
+  $("#preview-dialog").addEventListener("close", clearPreview);
+  $("#preview-dialog").addEventListener("cancel", clearPreview);
   $("#identity-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const button = event.submitter; button.disabled = true;
     try {

@@ -76,7 +76,7 @@ def main():
         assert near.get("duplicate"), "Exact case-insensitive manual duplicate should suggest a vote"
         sql("update public.playlist25_settings set max_proposals=2 where singleton;")
         assert rpc("playlist25_propose", TOKEN_A, "manual", "Trop", "", None)["status"] == 429
-        assert rpc("playlist25_propose", TOKEN_B, "manual", "Autre version live", "", None).get("item")
+        manual_b = rpc("playlist25_propose", TOKEN_B, "manual", "Autre version live", "", None)["item"]
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: rpc("playlist25_vote", TOKEN_A, pid, True), range(4)))
         assert all(result["voted"] for result in results)
@@ -85,6 +85,8 @@ def main():
         assert rpc("playlist25_vote", TOKEN_B, pid, False) == {"votes": 1, "voted": False}
         listed = rpc("playlist25_list", TOKEN_A, "", "popular", False)["items"]
         assert len(listed) == 3 and all("guest_id" not in row and "file_path" not in row and "token_hash" not in row for row in listed)
+        anonymous_items = rpc("playlist25_list", "7" * 64, "", "popular", False)["items"]
+        assert len(anonymous_items) == 3 and all(row["mine"] is False for row in anonymous_items), "Anonymous ownership flags must be booleans, never null"
         mine = rpc("playlist25_list", TOKEN_A, "", "recent", True)["items"]
         assert len(mine) == 2 and all(row["mine"] for row in mine)
         for role in ("anon", "authenticated"):
@@ -128,10 +130,40 @@ def main():
         assert sql(f"select count(*) from public.playlist25_votes where proposal_id={manual['id']};") == "0"
         assert rpc("playlist25_vote", TOKEN_B, pid, False)["votes"] == 1
         assert rpc("playlist25_vote", TOKEN_B, manual["id"], True)["status"] == 404
+        assert rpc("playlist25_withdraw", TOKEN_A, manual["id"])["status"] == 404, "Moderator archive must not be bypassed by withdrawal"
+        assert rpc("playlist25_withdraw", TOKEN_B, pid)["status"] == 404, "Same nickname must not authorize another guest's withdrawal"
+        assert rpc("playlist25_withdraw", "8" * 64, pid)["status"] == 401
+        sql("update public.playlist25_settings set proposals_open=false,votes_open=false,invitation_required=true where singleton;")
+        before_counts = sql("select (select count(*) from public.playlist25_sources),(select count(*) from public.playlist25_votes);")
+        withdrawn = rpc("playlist25_withdraw", TOKEN_A, pid)
+        assert withdrawn["withdrawn"] is True and withdrawn["id"] == pid and withdrawn["state"] == "archived"
+        timestamp = sql(f"select withdrawn_at from public.playlist25_proposals where id={pid};")
+        assert timestamp and rpc("playlist25_withdraw", TOKEN_A, pid)["withdrawn"] is True
+        assert sql(f"select withdrawn_at from public.playlist25_proposals where id={pid};") == timestamp, "Repeated withdrawal must preserve audit timestamp"
+        assert sql("select (select count(*) from public.playlist25_sources),(select count(*) from public.playlist25_votes);") == before_counts, "Withdrawal deleted source or vote history"
+        assert all(item["id"] != pid for item in rpc("playlist25_list", TOKEN_A, "", "popular", False)["items"])
+        assert rpc("playlist25_admin_publish", {"proposals_open": True, "votes_open": True, "invitation_required": False}, updates, role="service_role")["updated"] == 1
+        assert sql(f"select state from public.playlist25_proposals where id={pid};") == "archived", "Admin publish resurrected a withdrawn proposal"
+        assert rpc("playlist25_vote", TOKEN_A, pid, True)["status"] == 404
+        sql("update public.playlist25_settings set max_proposals=2 where singleton;")
+        readded = rpc("playlist25_propose", TOKEN_A, "youtube", None, "", "dQw4w9WgXcQ")["item"]
+        assert readded["id"] != pid and readded["source_id"] == item["source_id"] and readded["votes"] == 0
+        assert rpc("playlist25_withdraw", TOKEN_A, pid)["withdrawn"] is True
+        assert sql(f"select state from public.playlist25_proposals where id={readded['id']};") == "pending", "Repeat withdrawal removed the replacement"
+        assert sql(f"select count(*) from public.playlist25_votes where proposal_id={pid};") == "1", "Re-add moved historical votes"
+        assert rpc("playlist25_propose", TOKEN_A, "manual", "Fusion", "", None)["status"] == 409, "Moderator archive must still block exact re-add"
+        assert rpc("playlist25_vote", TOKEN_A, manual_b["id"], True)["votes"] == 1
+        assert rpc("playlist25_withdraw", TOKEN_B, manual_b["id"])["withdrawn"] is True
+        manual_readd = rpc("playlist25_propose", TOKEN_B, "manual", "Autre version live", "", None)["item"]
+        assert manual_readd["id"] != manual_b["id"] and manual_readd["source_id"] == manual_b["source_id"] and manual_readd["votes"] == 0
+        assert sql(f"select count(*) from public.playlist25_votes where proposal_id={manual_b['id']};") == "1"
+        sql(migration)
+        assert rpc("playlist25_session", TOKEN_A)["settings"]["proposals_open"] is True, "Migration changed existing configuration"
+        assert sql(f"select withdrawn_at from public.playlist25_proposals where id={pid};") == timestamp
         for _ in range(10):
             assert rpc("playlist25_identity", "9" * 64, "", None)["status"] == 422
         assert rpc("playlist25_identity", "9" * 64, "", None)["status"] == 429, "Failed actions must still consume their rate budget"
-        print("PASS: PostgreSQL migration twice, persistent identities, exact duplicates, quotas, concurrent votes/removal, RLS/grants, invitations, search budgets, secret snapshot, atomic admin publication.")
+        print("PASS: PostgreSQL reusable migration, persistent identities, duplicates/quotas, concurrent votes, RLS/private denials, invitations/search budgets, admin publication/merge, owner-only idempotent withdrawal, sticky archive/re-add and history preservation.")
     finally:
         subprocess.run(["docker", "stop", "-t", "1", name], capture_output=True)
 

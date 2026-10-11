@@ -49,12 +49,22 @@ def test_migration_verifies_expected_functions(monkeypatch,capsys):
     module=deployment_module(); calls=[]
     def request(ref,method,suffix,body=None):
         calls.append((method,suffix,body))
-        return [{'functions':5}] if body.get('read_only') else []
+        return [{'functions':6}] if body.get('read_only') else []
     monkeypatch.setattr(module,'management_request',request)
     module.install_schema('test-ref')
     assert len(calls)==2 and calls[0][2]['read_only'] is False
     assert 'BEGIN' in calls[0][2]['query'].upper()
+    assert 'playlist25_withdraw' in calls[1][2]['query']
+    assert "n.nspname='public'" in calls[1][2]['query']
     assert 'vérifiés' in capsys.readouterr().out
+
+
+def test_deployment_refuses_schema_missing_withdrawal_rpc(monkeypatch):
+    import pytest
+    module=deployment_module()
+    monkeypatch.setattr(module,'management_request',lambda ref,method,suffix,body=None: [{'functions':5}] if body.get('read_only') else [])
+    with pytest.raises(module.DeployError,match='fonctions attendues'):
+        module.install_schema('test-ref')
 
 
 def test_management_error_does_not_dump_private_response(monkeypatch):

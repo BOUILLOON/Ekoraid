@@ -153,8 +153,10 @@ def _validate(snapshot):
             raise CloudSyncError("Proposition distante incohérente.")
         if isinstance(sort_order, bool) or not isinstance(sort_order, int) or abs(sort_order) > 2**31 - 1:
             raise CloudSyncError("Ordre distant invalide.")
+        withdrawn_at = _date(row["withdrawn_at"]) if row.get("withdrawn_at") is not None else None
         proposals.append({"id": _identifier(row.get("id")), "source_id": sid, "guest_id": gid,
-                          "state": state, "sort_order": sort_order, "created_at": _date(row.get("created_at"))})
+                          "state": "archived" if withdrawn_at else state, "sort_order": sort_order,
+                          "withdrawn_at": withdrawn_at, "created_at": _date(row.get("created_at"))})
     proposal_ids = {p["id"] for p in proposals}
     if len(proposal_ids) != len(proposals):
         raise CloudSyncError("Propositions distantes dupliquées.")
@@ -198,18 +200,26 @@ def import_snapshot(cfg, conn, snapshot):
             sid = db.upsert_source(conn, row)
             remember("source", row["id"], sid)
             new_sources += int(not already_exists)
-        for row in proposals:
+        active_remote_locals = {mapped("proposal", row["id"]) for row in proposals
+                                if row["withdrawn_at"] is None and row["state"] in {"pending", "approved"}}
+        # First record withdrawals so re-additions can use a fresh proposal ID.
+        for row in sorted(proposals, key=lambda item: (item["withdrawn_at"] is None, item["id"])):
             pid = mapped("proposal", row["id"])
             if pid is not None and conn.execute("SELECT 1 FROM proposals WHERE id=?", (pid,)).fetchone():
                 # Local corrections, merges, moderation and ordering remain authoritative.
+                if row["withdrawn_at"]:
+                    if pid not in active_remote_locals:
+                        conn.execute("UPDATE proposals SET state='archived',withdrawn_at=COALESCE(withdrawn_at,?) WHERE id=?",
+                                     (row["withdrawn_at"], pid))
                 continue
             sid = mapped("source", row["source_id"])
-            existing = conn.execute("SELECT id FROM proposals WHERE source_id=? ORDER BY id LIMIT 1", (sid,)).fetchone()
+            existing = None if row["withdrawn_at"] else conn.execute(
+                "SELECT id FROM proposals WHERE source_id=? AND withdrawn_at IS NULL AND state IN ('pending','approved') ORDER BY id LIMIT 1", (sid,)).fetchone()
             if existing:
                 pid = existing["id"]
             else:
-                cursor = conn.execute("INSERT INTO proposals(source_id,guest_id,state,sort_order,created_at) VALUES(?,?,?,?,?)",
-                                      (sid, mapped("guest", row["guest_id"]), row["state"], row["sort_order"], row["created_at"]))
+                cursor = conn.execute("INSERT INTO proposals(source_id,guest_id,state,sort_order,withdrawn_at,created_at) VALUES(?,?,?,?,?,?)",
+                                      (sid, mapped("guest", row["guest_id"]), row["state"], row["sort_order"], row["withdrawn_at"], row["created_at"]))
                 pid = cursor.lastrowid
                 new_proposals += 1
             remember("proposal", row["id"], pid)
@@ -228,6 +238,10 @@ def import_snapshot(cfg, conn, snapshot):
         db.set_setting(conn, "cloud_last_sync", snapshot.get("exported_at") or db.now())
         db.set_setting(conn, "cloud_project", project)
         db.set_setting(conn, "cloud_public_settings", snapshot.get("settings", {}))
+        previous_withdrawals = db.get_setting(conn, "cloud_withdrawn_remote_" + project, [])
+        withdrawal_ids = {value for value in previous_withdrawals if type(value) is int}
+        withdrawal_ids.update(row["id"] for row in proposals if row["withdrawn_at"])
+        db.set_setting(conn, "cloud_withdrawn_remote_" + project, sorted(withdrawal_ids))
         conn.execute("RELEASE SAVEPOINT playlist25_cloud_sync")
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT playlist25_cloud_sync")
@@ -256,24 +270,29 @@ def push(cfg, conn):
                        "votes_open": db.get_setting(conn, "votes_open", True),
                        "invitation_required": db.get_setting(conn, "invitation_required", False),
                        "max_proposals": db.get_setting(conn, "max_proposals", cfg.max_proposals)}
-    rows = conn.execute("""SELECT m.remote_id,p.id,p.state,p.sort_order,s.title,s.artist
+    rows = conn.execute("""SELECT m.remote_id,p.id,p.state,p.withdrawn_at,p.sort_order,s.title,s.artist
       FROM cloud_map m JOIN proposals p ON p.id=CAST(m.local_id AS INTEGER)
       JOIN sources s ON s.id=p.source_id
       WHERE m.kind='proposal' AND substr(m.remote_id,1,length(?))=?""", (prefix, prefix)).fetchall()
     if len(rows) > 10000:
         raise CloudSyncError("Trop de propositions à publier en une opération (maximum 10000).")
+    # Avoid selecting a withdrawn historical mapping as the canonical merge target.
+    latest = db.get_setting(conn, "cloud_withdrawn_remote_" + project, [])
+    withdrawn_remote = {str(value) for value in latest if type(value) is int}
     updates, seen_local = [], {}
-    for row in sorted(rows, key=lambda item: int(item["remote_id"].split(":", 1)[1])):
+    for row in sorted(rows, key=lambda item: (item["remote_id"].split(":", 1)[1] in withdrawn_remote,
+                                            int(item["remote_id"].split(":", 1)[1]))):
         remote = _identifier(int(row["remote_id"].split(":", 1)[1]))
         if len(row["title"]) > 300 or len(row["artist"]) > 150:
             raise CloudSyncError("Une métadonnée dépasse les limites publiques : titre 300 caractères, artiste 150. Corrigez-la avant de publier.")
         update = {"id": remote,
-                  "state": "archived" if row["id"] in seen_local else row["state"],
+                  "state": "archived" if row["id"] in seen_local or row["withdrawn_at"] or str(remote) in withdrawn_remote else row["state"],
                   "title": row["title"], "artist": row["artist"], "sort_order": row["sort_order"]}
-        if row["id"] in seen_local and row["state"] != "archived":
+        if row["id"] in seen_local and row["state"] != "archived" and not row["withdrawn_at"] and str(remote) not in withdrawn_remote:
             update["merge_into"] = seen_local[row["id"]]
         updates.append(update)
-        seen_local.setdefault(row["id"], remote)
+        if str(remote) not in withdrawn_remote and not row["withdrawn_at"]:
+            seen_local.setdefault(row["id"], remote)
     result = _rpc(cfg, "playlist25_admin_publish", {"p_settings": public_settings, "p_updates": updates})
     if not isinstance(result, dict) or not isinstance(result.get("updated"), int):
         raise CloudSyncError("Réponse de publication invalide. Actualisez le site public pour vérifier son état.")

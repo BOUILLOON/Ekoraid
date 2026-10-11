@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class Settings:
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
-    event_name: str = "La playlist des 25 ans"
+    event_name: str = "Les 25 ans de Fanny"
     guest_host: str = "0.0.0.0"
     guest_port: int = 8000
     admin_host: str = "127.0.0.1"

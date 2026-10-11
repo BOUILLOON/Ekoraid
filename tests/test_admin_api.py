@@ -109,6 +109,72 @@ def test_moderation_metadata_and_merge_preserve_votes_and_cloud_mapping(cfg):
         assert conn.execute('SELECT local_id FROM cloud_map').fetchone()[0]==str(p1)
 
 
+def withdrawn_fixture(cfg):
+    with db.connect(cfg) as conn:
+        conn.execute('INSERT INTO guests VALUES(?,?,?)',('withdraw-owner','Invitée',db.now()))
+        source=db.upsert_source(conn,{'title':'Demande retirée'})
+        withdrawn_at=db.now()
+        removed=conn.execute('INSERT INTO proposals(source_id,guest_id,state,created_at,withdrawn_at) VALUES(?,?,?,?,?)',
+                             (source,'withdraw-owner','archived',db.now(),withdrawn_at)).lastrowid
+        ordinary_source=db.upsert_source(conn,{'title':'Demande encore présente'})
+        ordinary=conn.execute('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',(ordinary_source,db.now())).lastrowid
+    return removed,ordinary,withdrawn_at
+
+
+@pytest.mark.parametrize('state',['pending','approved','rejected'])
+def test_guest_withdrawal_cannot_be_restored_by_admin(cfg,state):
+    removed,_,withdrawn_at=withdrawn_fixture(cfg)
+    client,headers=admin(cfg)
+    result=client.patch(f'/api/proposals/{removed}',json={'state':state,'title':'Tentative de correction'},headers=headers)
+    assert result.status_code==409,result.text
+    assert 'retirée' in result.json()['detail']
+    item=next(item for item in client.get('/api/proposals').json()['items'] if item['id']==removed)
+    assert item['state']=='archived' and item['withdrawn_at']==withdrawn_at
+    assert item['title']=='Demande retirée'
+
+
+def test_withdrawn_metadata_remains_editable_without_losing_history(cfg):
+    removed,_,withdrawn_at=withdrawn_fixture(cfg)
+    client,headers=admin(cfg)
+    result=client.patch(f'/api/proposals/{removed}',json={'title':'Titre corrigé','artist':'Artiste précisé'},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['item']['title']=='Titre corrigé'
+    assert result.json()['item']['artist']=='Artiste précisé'
+    assert result.json()['item']['state']=='archived'
+    assert result.json()['item']['withdrawn_at']==withdrawn_at
+    assert client.patch(f'/api/proposals/{removed}',json={'state':'archived'},headers=headers).status_code==200
+
+
+def test_bulk_moderation_rejects_entire_mixed_selection_and_keeps_withdrawal(cfg):
+    removed,ordinary,withdrawn_at=withdrawn_fixture(cfg)
+    client,headers=admin(cfg)
+    payload={'proposal_ids':[ordinary,removed],'state':'approved'}
+    assert client.patch('/api/proposals',json=payload).status_code==403
+    for state in ('pending','approved','rejected'):
+        result=client.patch('/api/proposals',json={**payload,'state':state},headers=headers)
+        assert result.status_code==409,result.text
+        with db.connect(cfg) as conn:
+            assert conn.execute('SELECT state FROM proposals WHERE id=?',(ordinary,)).fetchone()[0]=='pending'
+            row=conn.execute('SELECT state,withdrawn_at FROM proposals WHERE id=?',(removed,)).fetchone()
+            assert tuple(row)==('archived',withdrawn_at)
+    result=client.patch('/api/proposals',json={'proposal_ids':[ordinary,ordinary],'state':'approved'},headers=headers)
+    assert result.status_code==200 and result.json()['count']==1
+    result=client.patch('/api/proposals',json={**payload,'state':'archived'},headers=headers)
+    assert result.status_code==200 and result.json()['count']==2
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE state="archived"').fetchone()[0]==2
+        assert conn.execute('SELECT withdrawn_at FROM proposals WHERE id=?',(removed,)).fetchone()[0]==withdrawn_at
+
+
+def test_bulk_moderation_missing_proposal_does_not_change_existing_one(cfg):
+    _,ordinary,_=withdrawn_fixture(cfg)
+    client,headers=admin(cfg)
+    result=client.patch('/api/proposals',json={'proposal_ids':[ordinary,9999],'state':'approved'},headers=headers)
+    assert result.status_code==404
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT state FROM proposals WHERE id=?',(ordinary,)).fetchone()[0]=='pending'
+
+
 def test_real_audio_upload_rename_pack_download_and_guest_cannot_fetch(cfg):
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'): pytest.skip('FFmpeg required')
     original=cfg.temp_dir/'test-original.wav'
