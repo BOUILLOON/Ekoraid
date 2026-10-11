@@ -17,7 +17,7 @@ Résultats obtenus le **11 octobre 2026**. Les tests de développement utilisent
 | Recherche YouTube réelle | HTTP **200** pour une recherche de morceaux et pour les métadonnées d’une vidéo précise ; cette dernière renvoie une durée de **143 s**, via `youtube-public-search-exact-video`. Aucun audio téléchargé. |
 | Durées des propositions existantes | Durées réelles complétées pour **27 sources vidéo**, uniquement lorsque leur durée était absente. **7 vidéos non résolues** et les demandes manuelles sans source restent inconnues. Identifiants et propriétaires conservés ; titres, artistes, états, ordre et votes non modifiés. |
 | Interface publiée avec Supabase réel | Le dossier exact `_site` servi localement a reçu de vraies réponses Supabase dans Chromium à **1 440 px et 390 px** : **33 propositions publiques**, recherche « Dalida » avec **5 résultats réels et leurs durées**, aucune erreur JavaScript ni débordement. Aucun invité, proposition ou vote de test créé. |
-| GitHub Pages | Déploiement [38165261752](https://github.com/BOUILLOON/Ekoraid/actions/runs/38165261752) **réussi**, commit `8188d45`. |
+| GitHub Pages | Déploiement [38166729295](https://github.com/BOUILLOON/Ekoraid/actions/runs/38166729295) **réussi**, commit `544a86e`. Le site inclut le téléchargement direct du studio Windows vérifié. |
 | Exécutable Windows autonome | Workflow [38166188497](https://github.com/BOUILLOON/Ekoraid/actions/runs/38166188497) **réussi**, commit `45aae4c`. Les **10 contrôles de l’application compilée** ont réussi sur Windows-2025 avec Python 3.12.10 ; la [release stable](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.1) est publiée. |
 
 ## Parcours vérifiés avec le vrai backend local
