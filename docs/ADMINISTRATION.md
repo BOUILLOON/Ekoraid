@@ -12,7 +12,7 @@ Pour les **25 ans de Fanny, le 17 octobre 2026 dès 19 h, à la salle des fêtes
 
 ## 1. Installer le studio sur Windows
 
-La version autonome **Studio-Fanny-Windows.zip est disponible** dans la [release Windows corrigée](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2). Son démarrage sans console, au premier lancement et avec une configuration existante, ainsi que la préparation audio ont été vérifiés sur Windows en CI.
+La livraison Windows **Studio-Fanny-Windows.zip** se télécharge depuis la [release `.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3). Elle comprend le studio et ses outils ; les contrôles réalisés sont indiqués dans les notes de la release et le [rapport de validation](VALIDATION.md).
 
 1. [Téléchargez Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur l’archive, puis **Extraire tout**. Gardez le dossier extrait entier.
@@ -30,6 +30,8 @@ Cette configuration se fait une seule fois sur votre PC, pendant le premier dém
 3. Copiez la clé **Secret** ou **service_role** du projet, réservée à l’administration, dans le champ privé de l’application. Cliquez sur **Enregistrer et ouvrir le studio**.
 
 La connexion est vérifiée avant son enregistrement. En cas de refus, la configuration précédente est conservée. La clé reste sur votre PC : ne la collez ni dans une conversation, ni dans le site public, ni dans une capture d’écran. Le studio peut démarrer sans cette connexion ; renseignez-la avant de récupérer la collecte publique. La clé publique du site ne donne pas ces droits d’administration.
+
+Sur un second PC, la connexion au même projet Supabase retrouve la même collecte ; elle ne la réinitialise pas. Les invités continuent à proposer et voter sur le même lien pendant que vous arrêtez, mettez à jour ou relancez le studio. Pour transporter aussi vos fichiers audio déjà préparés, utilisez la sauvegarde et la restauration décrites plus bas.
 
 Si vous utilisiez déjà les anciens scripts, arrêtez le studio, choisissez **Reprendre une ancienne installation** et sélectionnez le dossier qui contient votre `.env.local`. L’application réutilise cette installation sans déplacer ni supprimer ses fichiers. Ne remplacez pas votre ancienne configuration par un exemple.
 
@@ -59,12 +61,16 @@ Sur le site public, **Durée connue de toute la playlist** additionne les durée
 
 ## 5. Choisir et préparer les musiques
 
-1. Dans **Propositions**, vérifiez les titres et les versions. Pour une demande manuelle sans lien, cliquez sur **Modifier**, renseignez un **Lien YouTube précis**, puis **Enregistrer**. Vérifiez qu’il s’agit du morceau souhaité, pas d’une reprise ou d’un remix choisi par erreur.
+1. Dans **Propositions**, vérifiez les titres et les versions. Pour une demande manuelle sans lien, cliquez sur **Modifier**. Le champ de recherche reprend le titre et l’artiste : cliquez sur **Rechercher sur YouTube**, comparez la chaîne et la durée, puis **Choisir cette version**. **Voir d’autres versions** affiche la suite des résultats. Le choix remplit le formulaire ; seul **Enregistrer** associe la vidéo après vérification de ses métadonnées par le serveur. **Annuler** conserve la demande initiale. Vous pouvez aussi coller directement un **Lien YouTube précis**.
 2. Cochez quelques morceaux, ou cliquez sur **Tout sélectionner** pour choisir toutes les propositions correspondant au filtre, sur toutes les pages. **Valider la sélection** marque votre choix. **Sélectionner tous les validés** permet de reprendre ce groupe plus tard. Les propositions retirées par les invités sont exclues de cette sélection automatique.
 3. Cliquez sur **Préparer les fichiers de la sélection**. Confirmez que vous disposez des autorisations nécessaires, puis cliquez sur **Confirmer la préparation**. Cette confirmation ne vérifie pas juridiquement les droits.
 4. Ouvrez **Téléchargements** et attendez la fin du traitement. Un titre dans la liste n’est pas encore un fichier audio : il doit devenir **Disponible** après conversion et contrôle.
 
 Le PC et l’application doivent rester allumés pendant la préparation. Vous pouvez fermer le navigateur. **Suspendre après le morceau en cours** laisse terminer ce morceau ; **Réessayer les échecs** relance les éléments concernés après correction de leur problème.
+
+La recherche et l’association d’une source ne préparent aucun audio et conservent l’auteur, les votes et l’historique. Si le fichier de la version choisie existe déjà, il est réutilisé avec son nom et ses métadonnées. Pour modifier un fichier préparé, utilisez explicitement **Bibliothèque locale → Renommer**.
+
+Dans **Réglages & diagnostics**, choisissez le format **MP3 — compatibilité simple**, puis **Enregistrer les réglages**, pour préparer des `.mp3` destinés au pack. La préparation convertit et vérifie les nouveaux fichiers avant de les marquer disponibles. Ce réglage ne convertit pas rétroactivement les fichiers déjà prêts ; vérifiez leur format dans votre pack. La conversion n’améliore pas la qualité de la source.
 
 La file et les analyses n’ont pas de plafond de nombre par défaut. Un gros lot se prépare progressivement, un morceau à la fois : prévoyez suffisamment de temps et d’espace disque. Les fichiers prêts peuvent être récupérés pendant que le reste se prépare.
 
@@ -120,17 +126,33 @@ Le retrait masque la proposition dans la liste publique. L’historique, les vot
 
 Le bouton **Écouter** ouvre un aperçu YouTube uniquement après un clic. Il nécessite Internet ; écouter cet aperçu ne prépare pas le fichier du pack.
 
-## 9. Avant la soirée et pour dépanner
+**Plus de résultats** affiche d’autres résultats de recherche à la demande. Les repères live, reprise, remix ou instrumental proviennent du titre et restent indicatifs : ils ne certifient ni l’artiste ni la version. Les brouillons de recherche, lien, titre et artiste restent dans le même navigateur après une coupure ou une actualisation ; l’invité doit toujours confirmer l’ajout lui-même. Aucun ajout ni recherche n’est lancé automatiquement à la réouverture. Une erreur, un doublon ou une annulation conserve le brouillon ; un ajout réussi vide seulement les champs du mode envoyé s’ils n’ont pas été modifiés pendant la requête. Le catalogue conserve le défilement et le focus et propose **Afficher les nouveaux morceaux** lors de nouveaux ajouts ; ce bouton affiche ensuite les propositions les plus récentes.
+
+## 9. Sauvegarder et continuer sur un autre PC
+
+Une sauvegarde du studio est différente d’un pack audio pour la soirée. Elle contient la configuration privée, la base des propositions et votes, les profils et photos, et les fichiers audio locaux. Elle contient aussi le mot de passe et la clé privée Supabase : gardez ce ZIP confidentiel sur un support privé. Les exports et fichiers temporaires ne sont pas inclus ; conservez séparément votre pack final.
+
+1. Sur le premier PC, cliquez sur **Sauvegarder mon studio** dans la fenêtre de l’application et choisissez où enregistrer le ZIP. L’application arrête proprement le studio avant la copie et reprend ensuite s’il tournait. Attendez le résumé de réussite. La collecte publique continue pendant cette opération.
+2. Copiez cette sauvegarde sur le second PC. Installez l’application Windows, puis cliquez sur **Restaurer une sauvegarde**, également disponible dans le formulaire du premier lancement. Vous utiliserez le mot de passe de la sauvegarde sans créer une nouvelle configuration.
+3. Choisissez le ZIP, puis le dossier parent du nouveau studio. Vérifiez sa date et l’inventaire des propositions, invités, votes, photos et fichiers audio. Confirmez **Restaurer cette sauvegarde ?**. Une annulation conserve l’installation actuelle.
+4. La restauration crée un nouveau dossier `StudioFanny-restaure-…`, sans écraser l’ancien. L’application adopte ce dossier et relance le studio ; si elle indique que la relance automatique a échoué, fermez la fenêtre et rouvrez l’application.
+5. La file de préparation reste suspendue. Avant de reprendre, cliquez sur **Récupérer les propositions du site public** pour obtenir les ajouts et votes postérieurs à la sauvegarde. Désactivez le mode hors ligne s’il était enregistré.
+
+La connexion privée et les données locales sont reprises, tandis que l’ancien dossier reste disponible comme retour arrière. La restauration ne modifie ni ne réinitialise Supabase et ne publie pas automatiquement les réglages ou la modération de la sauvegarde. Vérifiez-les avant une publication explicite vers le site public. Sur un PC sans sauvegarde, vous pouvez simplement configurer la même connexion pour retrouver les informations publiques ; ses fichiers audio devront être préparés ou transférés séparément.
+
+## 10. Avant la soirée et pour dépanner
 
 - Refaites **Récupérer les propositions du site public**, terminez votre sélection et publiez la fermeture des ajouts/votes si souhaité.
 - Vérifiez que tous les morceaux retenus sont disponibles. Consultez les erreurs restantes et le rapport du pack.
 - Essayez le pack décompressé dans Mixxx, avec Internet coupé, sur le matériel audio de la soirée. Gardez une deuxième copie sur un autre support.
-- Pour sauvegarder la préparation, cliquez sur **Arrêter le studio**, puis copiez le dossier `%LOCALAPPDATA%\StudioFanny` complet vers un support privé. Collez ce chemin dans la barre d’adresse de l’Explorateur Windows pour le trouver. Si vous avez repris une ancienne installation, sauvegardez aussi ce dossier, avec sa configuration privée et ses données.
+- Pour sauvegarder la préparation, utilisez **Sauvegarder mon studio** et gardez le ZIP privé sur un second support, en plus du pack audio final. Pour trouver vos fichiers, **Ouvrir mes fichiers** ouvre leur dossier. Par défaut, il est dans `%LOCALAPPDATA%\StudioFanny` ; une installation restaurée ou reprise peut utiliser un autre dossier.
 - Activez **Mode soirée hors ligne** avant de couper Internet. Les fichiers locaux restent utilisables ; la recherche YouTube et les nouveaux téléchargements sont désactivés. Le site public GitHub Pages nécessite Internet et reste distinct du Wi-Fi de la salle.
 
-Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le studio**. Pour un diagnostic, utilisez **Réglages & diagnostics → Vérifier les prérequis**. Pour corriger Supabase, arrêtez le studio, puis utilisez **Configurer la connexion**. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
+Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le diagnostic**. Ce bouton reste disponible sans configuration ou après l’échec des services et ne modifie pas la collecte. Dans le navigateur privé, **Réglages & diagnostics → Vérifier les prérequis** contrôle aussi les outils. Pour corriger Supabase, arrêtez le studio, puis utilisez **Configurer la connexion**. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
 
-Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, [téléchargez le ZIP corrigé](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip) de la [version `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2), vérifiée sans console. Faites **Extraire tout** dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation, avec leur configuration privée : vos données restent à leur emplacement, sans connexion Supabase à refaire.
+Si la fenêtre ne démarre pas, double-cliquez sur **Diagnostic-Studio.cmd**, à côté de `Studio-Fanny.exe`. Il ouvre un rapport texte dans le Bloc-notes, ou les consignes locales si l’exécutable est bloqué avant de produire le diagnostic. Aucun PowerShell ni droit administrateur n’est requis. Le rapport exclut les mots de passe, clés privées et titres des invités ; il ne change aucune donnée publique. Le lanceur produit aussi un rapport automatiquement lorsqu’une erreur de démarrage peut être capturée.
+
+Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, ouvrez ce diagnostic et [téléchargez le ZIP](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip) de la [livraison `.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3). Faites **Extraire tout** dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation, avec leur configuration privée : vos données restent à leur emplacement, sans connexion Supabase à refaire.
 
 Si Windows affiche exactement **« Windows a protégé votre ordinateur »**, pour ce ZIP provenant de la release officielle, cliquez sur **Informations complémentaires / More info**, puis **Exécuter quand même / Run anyway**. Cet avertissement SmartScreen est différent de WinError 6. La mention **Éditeur inconnu** peut rester, car l’application n’a pas de signature d’éditeur. Le [guide d’installation](INSTALLATION.md#pour-déboguer) détaille ces deux situations.
 

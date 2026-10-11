@@ -104,6 +104,15 @@ def restore_streams():
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--diagnostic":
+        failure = None
+        try:
+            prepare_runtime()
+        except (OSError, ValueError, RuntimeError) as error:
+            failure = error
+        restore_streams()
+        from playlist25.diagnostics import main as diagnostic_main
+        return diagnostic_main(sys.argv[2:], startup_error=failure)
     prepare_runtime()
     restore_streams()
     if len(sys.argv) > 1 and sys.argv[1] == "--service":
@@ -117,27 +126,40 @@ def main():
     return desktop_main()
 
 
+def startup_diagnostic(error):
+    """A failed GUI still leaves a shareable report, without its raw error."""
+    try:
+        from playlist25.diagnostics import write_diagnostic
+        return write_diagnostic(error=error)
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (ValueError, RuntimeError, OSError) as error:
         if len(sys.argv) == 1:
+            report = startup_diagnostic(error)
             try:
                 from tkinter import messagebox
-                messagebox.showerror("Studio de Fanny", f"Le studio n'a pas pu démarrer.\n{error}\nVos propositions et fichiers restent conservés.")
+                details = f"\nDiagnostic : {report}" if report else "\nOuvrez Diagnostic-Studio.cmd dans le dossier de l'application."
+                messagebox.showerror("Studio de Fanny", f"Le studio n'a pas pu démarrer ({type(error).__name__}).{details}\nVos propositions et fichiers restent conservés.")
             except Exception:
                 pass
         print(f"Studio : {error}", file=sys.stderr)
         raise SystemExit(1)
-    except Exception:
+    except Exception as error:
         # Windowed bootloaders can hide an uncaught service traceback in a
         # dialog. Keep failures visible in the inherited private service log.
         import traceback
         traceback.print_exc(file=sys.stderr)
         if len(sys.argv) == 1:
+            report = startup_diagnostic(error)
             try:
                 from tkinter import messagebox
-                messagebox.showerror("Studio de Fanny", "Le studio a rencontré un problème au démarrage. Consultez son diagnostic avant de le relancer. Vos propositions et fichiers restent conservés.")
+                details = f"\nDiagnostic : {report}" if report else "\nOuvrez Diagnostic-Studio.cmd dans le dossier de l'application."
+                messagebox.showerror("Studio de Fanny", "Le studio a rencontré un problème au démarrage." + details + "\nVos propositions et fichiers restent conservés.")
             except Exception:
                 pass
         raise SystemExit(1)

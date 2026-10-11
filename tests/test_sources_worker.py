@@ -13,7 +13,7 @@ import pytest
 
 from playlist25.config import Settings
 from playlist25.db import connect, init_db, now, set_setting, upsert_source
-from playlist25.providers import SourceError, analyze, analyze_links, parse_youtube_url, search, yt_dlp_command
+from playlist25.providers import SourceError, analyze, analyze_links, parse_youtube_url, search, search_page, yt_dlp_command
 from playlist25.queue import claim_job, enqueue_sources, queue_snapshot, recover_jobs
 from playlist25.worker import TaskFailure, WorkerLock, _check_space, _perform_job, run
 
@@ -125,6 +125,57 @@ def test_live_and_overlong_search_results_are_not_available(cfg):
     with patch("playlist25.providers._metadata", return_value=(info, "")):
         results = search("Titre artiste", cfg)
     assert [result["title"] for result in results] == ["Studio"]
+
+
+def test_search_pages_fetch_real_lookahead_metadata_and_keep_exact_ids(cfg):
+    catalogue = [{"id": f"{i:011d}", "title": f"Version réelle {i}"} for i in range(13)]
+    def metadata(target, settings, *, playlist, limit):
+        assert target == f"ytsearch{limit}:Artiste version"
+        assert playlist
+        return {"entries": catalogue[:limit]}, ""
+    with patch("playlist25.providers._metadata", side_effect=metadata) as fetch:
+        first = search_page("Artiste version", cfg)
+        second = search_page("Artiste version", cfg, offset=first["next_offset"])
+        last = search_page("Artiste version", cfg, offset=second["next_offset"])
+    assert [call.kwargs["limit"] for call in fetch.call_args_list] == [6, 11, 16]
+    assert first["has_more"] and first["next_offset"] == 5
+    assert second["has_more"] and second["next_offset"] == 10
+    assert not last["has_more"] and last["next_offset"] is None
+    returned = first["items"] + second["items"] + last["items"]
+    assert [item["video_id"] for item in returned] == [item["id"] for item in catalogue]
+    assert all(item["url"] == f"https://www.youtube.com/watch?v={item['video_id']}" for item in returned)
+
+
+def test_search_without_real_extra_item_never_invents_another_page(cfg):
+    info = {"entries": [{"id": f"{i:011d}", "title": "Même titre"} for i in range(5)]}
+    with patch("playlist25.providers._metadata", return_value=(info, "")):
+        page = search_page("Titre", cfg)
+    assert len(page["items"]) == 5
+    assert page["has_more"] is False and page["next_offset"] is None
+
+
+def test_search_deduplicates_exact_video_identity_without_merging_versions(cfg):
+    info = {"entries": [{"id": VIDEO, "title": "Titre"}, {"id": VIDEO, "title": "Titre dupliqué"},
+                         {"id": "aaaaaaaaaaa", "title": "Titre"}]}
+    with patch("playlist25.providers._metadata", return_value=(info, "")):
+        results = search("Titre", cfg)
+    assert [item["video_id"] for item in results] == [VIDEO, "aaaaaaaaaaa"]
+
+
+@pytest.mark.parametrize("offset,limit", [(-1, 5), (100, 5), (True, 5), (1.5, 5), (0, 0), (0, 11), (0, True)])
+def test_invalid_search_pages_do_not_contact_provider(cfg, offset, limit):
+    with patch("playlist25.providers._metadata") as fetch:
+        with pytest.raises(SourceError):
+            search_page("Titre", cfg, offset=offset, limit=limit)
+    fetch.assert_not_called()
+
+
+def test_search_request_window_is_bounded_at_last_page(cfg):
+    entries = [{"id": f"{i:011d}", "title": "Titre"} for i in range(100)]
+    with patch("playlist25.providers._metadata", return_value=({"entries": entries}, "")) as fetch:
+        page = search_page("Titre", cfg, offset=95, limit=10)
+    assert fetch.call_args.kwargs["limit"] == 100
+    assert len(page["items"]) == 5 and not page["has_more"]
 
 
 def test_links_keep_failures_without_fetching_arbitrary_urls(cfg):

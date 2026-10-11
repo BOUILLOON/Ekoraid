@@ -162,12 +162,37 @@ def _entry(info, position: int, cfg) -> dict:
             "duration": duration, "thumbnail": str(info.get("thumbnail") or "")[:2048], "available": available, "reason": reason, "already_available": False}
 
 
-def search(query: str, cfg) -> list[dict]:
+SEARCH_MAX_RESULTS = 100
+SEARCH_PAGE_MAX = 10
+
+
+def search(query: str, cfg, *, limit: int | None = None) -> list[dict]:
     if not isinstance(query, str) or not 2 <= len(query.strip()) <= 200 or any(ord(c) < 32 for c in query):
         raise SourceError("Saisissez un artiste ou un titre de 2 à 200 caractères.")
-    limit = max(1, min(int(getattr(cfg, "search_limit", 5)), 10))
+    if limit is None:
+        limit = max(1, min(int(getattr(cfg, "search_limit", 5)), SEARCH_PAGE_MAX))
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_MAX_RESULTS:
+        raise SourceError("La fenêtre de recherche demandée est invalide.")
     info, _ = _metadata(f"ytsearch{limit}:{query.strip()}", cfg, playlist=True, limit=limit)
-    return [entry for i, item in enumerate(info.get("entries") or [], 1) if (entry := _entry(item, i, cfg))["available"]]
+    entries, seen = [], set()
+    for i, item in enumerate((info.get("entries") or [])[:limit], 1):
+        entry = _entry(item, i, cfg)
+        if entry["available"] and entry["video_id"] not in seen:
+            seen.add(entry["video_id"])
+            entries.append(entry)
+    return entries
+
+
+def search_page(query: str, cfg, *, offset: int = 0, limit: int = 5) -> dict:
+    """Request a bounded metadata prefix; an actual extra result proves more."""
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset < SEARCH_MAX_RESULTS:
+        raise SourceError("La page de recherche demandée est invalide.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_PAGE_MAX:
+        raise SourceError("Choisissez entre 1 et 10 résultats par page.")
+    end = offset + limit
+    entries = search(query, cfg, limit=min(SEARCH_MAX_RESULTS, end + 1))
+    has_more = len(entries) > end
+    return {"items": entries[offset:end], "has_more": has_more, "next_offset": end if has_more else None}
 
 
 def _playlist_entries(raw_entries: list, cfg, cap: int | None) -> tuple[list[dict], list[str], bool, int]:

@@ -3,6 +3,7 @@
 (() => {
   const $ = (selector) => document.querySelector(selector);
   const state = { session: null, settings: {}, view: "dashboard", proposals: [], selected: new Set(), library: [], exports: new Set(), analysis: null, positions: new Set(), jobs: [], paused: false, editing: null, rightsResolve: null, choiceResolve: null, pages: {}, pagination: {}, playlists: [], queueResult: null };
+  let editSearchSerial = 0, editSearchAbort = null;
   const PAGE_SIZE = 100;
   const labels = { pending: "À vérifier", approved: "Validé", rejected: "Refusé", archived: "Archivé", queued: "En attente", downloading: "Téléchargement", converting: "Conversion", verifying: "Vérification", available: "Disponible", interrupted: "Interrompu", unavailable: "Indisponible", failed: "Erreur", error: "Erreur", stopped: "Arrêté" };
   const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
@@ -33,8 +34,8 @@
     const isFile = options.body instanceof FormData;
     if (options.body !== undefined && !isFile) headers["Content-Type"] = "application/json";
     let response;
-    try { response = await fetch(path, { method: options.method || "GET", credentials: "same-origin", headers, body: options.body === undefined ? undefined : isFile ? options.body : JSON.stringify(options.body) }); }
-    catch { throw new Error("L’application locale est inaccessible. Vérifiez que le lanceur est toujours ouvert, puis actualisez."); }
+    try { response = await fetch(path, { method: options.method || "GET", credentials: "same-origin", headers, signal: options.signal, body: options.body === undefined ? undefined : isFile ? options.body : JSON.stringify(options.body) }); }
+    catch (error) { if (error.name === "AbortError") throw error; throw new Error("L’application locale est inaccessible. Vérifiez que le lanceur est toujours ouvert, puis actualisez."); }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(errorText(data.detail || data)); error.status = response.status; error.detail = data.detail;
@@ -142,11 +143,57 @@
     });
   }
   function edit(item, kind) {
+    clearEditSearch();
     state.editing = { item, kind };
     $("#edit-title").value = item.title || ""; $("#edit-artist").value = item.artist || ""; $("#edit-url").value = item.url || ""; $("#edit-state").value = item.state || "pending";
     $("#edit-heading").textContent = kind === "library" ? "Renommer le morceau" : "Modifier la proposition";
     $("#edit-state").disabled = kind === "proposal" && !!item.withdrawn_at; $("#edit-withdrawal-note").classList.toggle("hidden", kind !== "proposal" || !item.withdrawn_at);
+    $("#edit-search").classList.toggle("hidden", kind !== "proposal" || !!item.withdrawn_at);
+    $("#edit-search-query").value = [item.artist, item.title].filter(Boolean).join(" ").slice(0, 200);
+    $("#edit-search-button").disabled = !!state.settings.offline_mode;
+    if (state.settings.offline_mode) feedback($("#edit-search-feedback"), "La recherche YouTube est désactivée en mode soirée hors ligne.");
     $("#edit-url-field").classList.toggle("hidden", kind === "library"); $("#edit-state-field").classList.toggle("hidden", kind === "library"); feedback($("#edit-feedback"), ""); $("#edit-dialog").showModal();
+  }
+  function clearEditSearch() {
+    editSearchSerial += 1; editSearchAbort?.abort(); editSearchAbort = null;
+    state.editSearch = null; $("#edit-search-results").replaceChildren(); $("#edit-search-more").classList.add("hidden");
+    $("#edit-search-more").disabled = false; $("#edit-search-button").disabled = !!state.settings.offline_mode; feedback($("#edit-search-feedback"), "");
+  }
+  function chooseEditSource(item, trigger) {
+    if (!state.editing || state.editing.kind !== "proposal" || state.editing.item.withdrawn_at) return;
+    $("#edit-url").value = `https://www.youtube.com/watch?v=${item.video_id}`;
+    const original = state.editing.item, samePrepared = original.video_id === item.video_id && original.status === "available" && !!original.file_path;
+    if (!samePrepared) {
+      $("#edit-title").value = (item.title || $("#edit-title").value).slice(0, 500);
+      if (item.artist) $("#edit-artist").value = item.artist.slice(0, 300);
+    }
+    document.querySelectorAll("[data-edit-source-id]").forEach((node) => node.setAttribute("aria-pressed", node === trigger ? "true" : "false"));
+    feedback($("#edit-search-feedback"), `Version choisie : ${item.title}. Cliquez sur Enregistrer pour l’associer. Aucun téléchargement n’a été lancé.`, "success");
+  }
+  async function searchEditSources(more = false) {
+    if (!state.editing || state.editing.kind !== "proposal" || state.editing.item.withdrawn_at || state.settings.offline_mode) return;
+    const query = $("#edit-search-query").value.trim(), target = $("#edit-search-feedback"), results = $("#edit-search-results");
+    if (query.length < 2) { feedback(target, "Saisissez au moins deux caractères pour rechercher un titre ou un artiste.", "warning"); return; }
+    const offset = more && state.editSearch?.query === query ? state.editSearch.nextOffset : 0;
+    if (!Number.isInteger(offset) || offset < 0) return;
+    editSearchAbort?.abort(); const controller = new AbortController(), serial = ++editSearchSerial; editSearchAbort = controller;
+    const trigger = $(more ? "#edit-search-more" : "#edit-search-button"); trigger.disabled = true;
+    if (!offset) { results.replaceChildren(); $("#edit-search-more").classList.add("hidden"); }
+    feedback(target, "Recherche des versions disponibles sur YouTube…");
+    try {
+      const result = await api("/api/search", { method: "POST", body: { query, offset }, signal: controller.signal });
+      if (serial !== editSearchSerial || !$("#edit-dialog").open) return;
+      state.editSearch = { query, nextOffset: result.next_offset };
+      (result.items || []).filter((item) => /^[A-Za-z0-9_-]{11}$/.test(item.video_id || "") && item.available !== false).forEach((item) => {
+        const row = el("article", "search-result edit-search-result"), content = el("div", "search-result-text");
+        content.append(el("h3", "", item.title), el("p", "muted", `${item.channel || "Chaîne non communiquée"} · ${duration(item.duration)}${item.artist ? ` · ${item.artist}` : ""}`));
+        const link = el("a", "result-source", "Voir sur YouTube →"); link.href = `https://www.youtube.com/watch?v=${item.video_id}`; link.target = "_blank"; link.rel = "noreferrer"; content.append(link);
+        const select = button("Choisir cette version", () => chooseEditSource(item, select)); select.dataset.editSourceId = item.video_id; select.setAttribute("aria-pressed", "false"); row.append(content, select); results.append(row);
+      });
+      $("#edit-search-more").classList.toggle("hidden", !result.has_more || !Number.isInteger(result.next_offset));
+      feedback(target, results.children.length ? `${results.children.length} version(s) affichée(s). Choisissez celle qui correspond à la demande.` : "Aucune version trouvée. Précisez l’artiste ou le titre, ou collez un lien YouTube précis.");
+    } catch (error) { if (serial === editSearchSerial && error.name !== "AbortError") feedback(target, error.message, "error"); }
+    finally { if (serial === editSearchSerial) { $("#edit-search-button").disabled = false; $("#edit-search-more").disabled = false; editSearchAbort = null; } }
   }
   function renderMergeChoices(reset = false) {
     const all = state.proposals.filter((item) => item.state !== "archived"), query = $("#merge-query").value.trim().toLocaleLowerCase("fr");
@@ -302,7 +349,25 @@
   $("#approve-selected").addEventListener("click", (event) => work(event.currentTarget, async () => { await api("/api/proposals", { method: "PATCH", body: { proposal_ids: Array.from(state.selected), state: "approved" } }); await loadProposals(); toast("Sélection validée."); }));
   $("#export-selected-ready").addEventListener("click", () => work(null, () => openReadyExports(selectedReadySources())));
   $("#download-selected").addEventListener("click", async (event) => { const trigger = event.currentTarget, items = selectedProposals(), sources = selectedSources(); if (!sources.length) { feedback($("#admin-feedback"), "Associez d’abord un lien YouTube aux propositions sélectionnées avec Modifier.", "warning"); return; } const playlists = items.filter((item) => item.source_kind === "playlist").length; if (!await confirmRights(`${sources.length} source(s) sélectionnée(s). ${playlists ? `${playlists} playlist(s) seront analysées avant la préparation ; les éléments indisponibles et les analyses incomplètes seront signalés. ` : ""}${items.filter((item) => !item.url).length ? "Les demandes sans lien seront ignorées et restent à retrouver." : "Les fichiers déjà présents seront réutilisés."}`)) return; await work(trigger, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: sources, rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); });
-  $("#edit-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const { item, kind } = state.editing, body = { title: $("#edit-title").value.trim(), artist: $("#edit-artist").value.trim() }; if (kind === "proposal") { if (!item.withdrawn_at) body.state = $("#edit-state").value; const url = $("#edit-url").value.trim(); if (url && url !== item.url) body.url = url; } const result = await api(`/api/${kind === "library" ? "library" : "proposals"}/${item.id}`, { method: "PATCH", body }); $("#edit-dialog").close(); toast("Morceau mis à jour."); if (result.warnings?.length) feedback($("#admin-feedback"), result.warnings.join(" "), "warning"); await (kind === "library" ? loadLibrary() : loadProposals()); }, $("#edit-feedback")); });
+  $("#edit-search-button").addEventListener("click", () => searchEditSources());
+  $("#edit-search-more").addEventListener("click", () => searchEditSources(true));
+  $("#edit-search-query").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); searchEditSources(); } });
+  $("#edit-dialog").addEventListener("close", () => { clearEditSearch(); state.editing = null; });
+  $("#edit-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => {
+    if (!state.editing) return;
+    const { item, kind } = state.editing, body = {}, title = $("#edit-title").value.trim(), artist = $("#edit-artist").value.trim();
+    if (title !== (item.title || "")) body.title = title;
+    if (artist !== (item.artist || "")) body.artist = artist;
+    if (kind === "proposal") {
+      if (!item.withdrawn_at && $("#edit-state").value !== item.state) body.state = $("#edit-state").value;
+      const url = $("#edit-url").value.trim(); if (url && url !== item.url) { body.url = url; if (artist) body.artist = artist; }
+    }
+    if (!Object.keys(body).length) { $("#edit-dialog").close(); return; }
+    const result = await api(`/api/${kind === "library" ? "library" : "proposals"}/${item.id}`, { method: "PATCH", body });
+    $("#edit-dialog").close(); toast("Morceau mis à jour.");
+    await (kind === "library" ? loadLibrary() : loadProposals());
+    if (result.warnings?.length) feedback($("#admin-feedback"), result.warnings.join(" "), "warning");
+  }, $("#edit-feedback")); });
   $("#open-merge").addEventListener("click", () => { $("#merge-query").value = ""; renderMergeChoices(true); $("#merge-confirm").checked = false; feedback($("#merge-feedback"), ""); $("#merge-dialog").showModal(); });
   $("#merge-query").addEventListener("input", () => renderMergeChoices());
   $("#merge-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { await api("/api/proposals/merge", { method: "POST", body: { keep_id: Number($("#merge-keep").value), merge_id: Number($("#merge-other").value), confirmed: $("#merge-confirm").checked } }); $("#merge-dialog").close(); await loadProposals(); toast("Propositions réunies, votes conservés."); }, $("#merge-feedback")); });

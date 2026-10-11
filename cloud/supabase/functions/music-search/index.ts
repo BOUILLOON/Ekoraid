@@ -1,5 +1,5 @@
 // Déployer avec Supabase Edge Functions. Aucun SDK/CDN ni accès service_role.
-import { parseOfficialSearch, parseYouTubeHTML, parseYouTubeVideoHTML } from "./parser.mjs";
+import { parseOfficialSearch, parseYouTubeHTML, parseYouTubeSearchPage, parseYouTubeVideoHTML, pageSearchItems, searchWindow } from "./parser.mjs";
 
 const cors = { "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -50,6 +50,11 @@ Deno.serve(async (request: Request) => {
       throw new SearchError("Tapez entre 3 et 120 caractères pour chercher.", 422);
     if (action === "video" && (typeof body.video_id !== "string" || !/^[A-Za-z0-9_-]{11}$/.test(body.video_id)))
       throw new SearchError("Ce lien doit désigner un morceau YouTube précis.", 422);
+    let window = {offset: 0, limit: 5};
+    if (action === "search") {
+      try { window = searchWindow(body.offset ?? 0, body.limit ?? 5); }
+      catch { throw new SearchError("Page de recherche invalide : choisissez entre 1 et 10 résultats par lot.", 422); }
+    }
     const supabase = Deno.env.get("SUPABASE_URL") || "";
     const anon = Deno.env.get("SUPABASE_ANON_KEY") || "";
     if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(supabase) || !anon)
@@ -81,9 +86,11 @@ Deno.serve(async (request: Request) => {
       if (!item) throw new SearchError("YouTube n’a pas retourné ce morceau exact. La durée reste inconnue jusqu’à vérification.");
       return answer({item, provider: "youtube-public-search-exact-video"});
     }
-    let items;
+    let page;
     if (apiKey) {
-      const params = new URLSearchParams({part: "snippet", type: "video", maxResults: "5", q: query, key: apiKey});
+      // A finite real API window uses the same offset contract as public HTML.
+      // Its nextPageToken is never guessed or accepted as an arbitrary URL.
+      const params = new URLSearchParams({part: "snippet", type: "video", maxResults: "50", q: query, key: apiKey});
       const search = await remoteJSON(`https://www.googleapis.com/youtube/v3/search?${params}`);
       const ids = (search.items || []).map((item: any) => item.id?.videoId)
         .filter((id: unknown) => typeof id === "string" && /^[A-Za-z0-9_-]{11}$/.test(id)).join(",");
@@ -94,15 +101,15 @@ Deno.serve(async (request: Request) => {
           details = await remoteJSON(`https://www.googleapis.com/youtube/v3/videos?${parts}`);
         } catch { /* Durée absente : conserver les métadonnées de recherche réelles. */ }
       }
-      items = parseOfficialSearch(search, details);
+      page = pageSearchItems(parseOfficialSearch(search, details, 50), window.offset, window.limit);
     } else {
       const endpoint = `https://www.youtube.com/results?${new URLSearchParams({search_query: query, hl: "fr"})}`;
       const response = await fetch(endpoint, { headers: {"Accept-Language": "fr-FR,fr;q=0.9", "User-Agent": "Playlist25/1.0"},
         signal: AbortSignal.timeout(8000), redirect: "error" });
       if (!response.ok) throw new SearchError("YouTube refuse la recherche externe. Utilisez un lien ou un titre ; l’organisateur peut activer l’API gratuite optionnelle.");
-      items = parseYouTubeHTML(await boundedText(response, 3 * 1024 * 1024));
+      page = parseYouTubeSearchPage(await boundedText(response, 3 * 1024 * 1024), window.offset, window.limit);
     }
-    return answer({items, provider: apiKey ? "youtube-data-api" : "youtube-public-search"});
+    return answer({...page, provider: apiKey ? "youtube-data-api" : "youtube-public-search"});
   } catch (error) {
     if (error instanceof SearchError) return answer({error: error.message}, error.status);
     // Ne jamais renvoyer les exceptions fetch : elles peuvent contenir la clé API.

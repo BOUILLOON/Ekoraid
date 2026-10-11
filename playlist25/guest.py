@@ -408,7 +408,8 @@ def create_guest_app(cfg) -> FastAPI:
             return {"items": [_public(item) for item in items]}
 
     @app.get("/api/search")
-    def search(request: Request, q: str = Query(min_length=2, max_length=180)):
+    def search(request: Request, q: str = Query(min_length=2, max_length=180),
+               offset: int = Query(default=0, ge=0, lt=100), limit: int = Query(default=5, ge=1, le=10)):
         rate_limit(request, "search", 15)
         query = _text(q, "La recherche", required=True)
         if len(query) < 2:
@@ -420,15 +421,15 @@ def create_guest_app(cfg) -> FastAPI:
         if not _EXTERNAL_SLOTS.acquire(blocking=False):
             raise HTTPException(503, "La recherche est occupée. Réessaie dans quelques instants.")
         try:
-            entries = providers.search(query, cfg)
+            page = providers.search_page(query, cfg, offset=offset, limit=limit)
             items = []
-            for entry in entries[:cfg.search_limit]:
+            for entry in page["items"]:
                 try:
                     clean = _entry(entry, cfg)
                 except (ValueError, HTTPException):
                     continue
                 items.append(clean)
-            return {"items": items}
+            return {"items": items, "has_more": page["has_more"], "next_offset": page["next_offset"]}
         except ValueError as error:
             raise _source_error(error) from error
         finally:

@@ -5,7 +5,7 @@ No Supabase writes, external searches or YouTube/audio downloads occur here.
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import ctypes
 import http.cookiejar
 import io
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -291,6 +292,16 @@ def smoke(executable: Path, *, report=None) -> dict:
             versions[name] = version.splitlines()[0]
         report["runtime_versions"] = versions
         report["checks"].append("bundled runtime executables start")
+        diagnostic_path = home / "diagnostic-fixture.txt"
+        run("--diagnostic", "--output", str(diagnostic_path))
+        diagnostic_text = diagnostic_path.read_text(encoding="utf-8")
+        if not diagnostic_text or environment["ADMIN_PASSWORD"] in diagnostic_text or environment["SESSION_SECRET"] in diagnostic_text:
+            raise RuntimeError("Standalone frozen diagnostic is missing or contains private fixture values.")
+        if '"services_started": false' not in diagnostic_text or '"network_requests": false' not in diagnostic_text:
+            raise RuntimeError("Frozen diagnostic must run without starting a service or network request.")
+        if not (executable.parent / "Diagnostic-Studio.cmd").is_file() or not (executable.parent / "Aide" / "Diagnostic-Studio.txt").is_file():
+            raise RuntimeError("The independent double-click diagnostic launcher or fallback guide is missing.")
+        report["checks"].append("standalone frozen diagnostic and double-click fallback, no secrets or services")
         explorer_gui_smoke(executable, environment, home / "gui-explorer-first-run", report)
         explorer_gui_smoke(executable, environment, home / "gui-explorer-configured", report, configured=True)
         # A fresh GUI home exercises the first-run form without auto-starting
@@ -322,10 +333,12 @@ def smoke(executable: Path, *, report=None) -> dict:
         if (home / "data" / "processes.json").exists() or not (home / "data" / "playlist.sqlite3").is_file():
             raise RuntimeError("Frozen stop did not clear its process register while preserving the database.")
         report["checks"].append("frozen supervisor start/worker/readiness/stop with no orphan processes")
+        independent_services = []
         for surface in ("guest", "admin"):
             log_path = home / f"{surface}.log"
             log = stack.enter_context(log_path.open("wb"))
             process = subprocess.Popen([str(executable), "--service", "serve", surface], env=environment, cwd=home, stdout=log, stderr=subprocess.STDOUT)
+            independent_services.append(process)
             stack.callback(stop_process, process)
             wait_ready(process, bases[surface], surface, opener, log_path=log_path)
         report["checks"].append("independent frozen guest/admin HTTP health")
@@ -373,6 +386,38 @@ def smoke(executable: Path, *, report=None) -> dict:
             else:
                 raise RuntimeError("The guest surface exposed an administrative endpoint.")
         report["checks"].append("guest surface cannot expose private administration/audio")
+        for process in independent_services:
+            stop_process(process)
+        private_path = home / ".env.local"
+        database_path = home / "data" / "playlist.sqlite3"
+        original_config = private_path.read_bytes()
+        def fixture_rows(path):
+            with closing(sqlite3.connect(path)) as connection:
+                return {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                        for table in ("guests", "sources", "proposals", "votes", "jobs", "settings", "cloud_map")}
+        original_database = fixture_rows(database_path)
+        original_audio_path = home / "data" / "audio" / source["file_path"]
+        original_audio = original_audio_path.read_bytes()
+        backup_directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="studio-fanny-private-backup-smoke-")))
+        backup_path = backup_directory / "private-studio-backup.zip"
+        backup_info = json.loads(run("--service", "backup", "--home", str(home), "--destination", str(backup_path)).stdout)
+        inspected = json.loads(run("--service", "inspect-backup", "--archive", str(backup_path)).stdout)
+        if not backup_info.get("confidential") or inspected["counts"]["audio_files"] < 1:
+            raise RuntimeError("Frozen private backup omitted its confidential flag or prepared audio.")
+        restored_home = backup_directory / "restored-studio"
+        restored = json.loads(run("--service", "restore-backup", "--archive", str(backup_path), "--home", str(restored_home),
+                                  "--expected-manifest-sha256", inspected["manifest_sha256"]).stdout)
+        if Path(restored["home"]).resolve() != restored_home.resolve():
+            raise RuntimeError("Frozen restoration did not use the new installation.")
+        with closing(sqlite3.connect(restored_home / "data" / "playlist.sqlite3")) as connection:
+            restored_file = connection.execute("SELECT file_path FROM sources WHERE id=?", (source["id"],)).fetchone()[0]
+        if not restored_file or (restored_home / "data" / "audio" / restored_file).read_bytes() != original_audio:
+            raise RuntimeError("Frozen restoration did not preserve and relocate the verified MP3.")
+        if private_path.read_bytes() != original_config or fixture_rows(database_path) != original_database:
+            raise RuntimeError("Frozen backup/restoration modified the original installation.")
+        if original_audio_path.read_bytes() != original_audio:
+            raise RuntimeError("Frozen backup/restoration changed the original audio.")
+        report["checks"].append("frozen full private backup/inspect/fresh restoration with MP3 and original data preserved")
     report["status"] = "passed"
     return report
 

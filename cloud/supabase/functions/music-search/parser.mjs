@@ -50,6 +50,19 @@ function initialObject(html, name) {
 
 export function initialData(html) { return initialObject(html, "ytInitialData"); }
 
+export function searchWindow(offset = 0, limit = 5) {
+  if (!Number.isInteger(offset) || offset < 0 || offset >= 100
+      || !Number.isInteger(limit) || limit < 1 || limit > 10)
+    throw new Error("Page de recherche invalide : choisissez entre 1 et 10 résultats par lot.");
+  return {offset, limit};
+}
+
+export function pageSearchItems(items, offset = 0, limit = 5) {
+  searchWindow(offset, limit);
+  const end = offset + limit, hasMore = items.length > end;
+  return {items: items.slice(offset, end), has_more: hasMore, next_offset: hasMore ? end : null};
+}
+
 export function parseYouTubeVideoHTML(html, expectedId) {
   if (!/^[A-Za-z0-9_-]{11}$/.test(expectedId || "")) throw new Error("Identifiant de vidéo invalide.");
   const data = initialObject(html, "ytInitialPlayerResponse");
@@ -99,7 +112,14 @@ export function parseYouTubeHTML(html, limit = 5) {
   return items;
 }
 
-export function parseOfficialSearch(search, details = {}) {
+export function parseYouTubeSearchPage(html, offset = 0, limit = 5) {
+  searchWindow(offset, limit);
+  // Only the real initial HTML result window is available here. No fabricated
+  // continuation or inferred total is used after that window is exhausted.
+  return pageSearchItems(parseYouTubeHTML(html, 100), offset, limit);
+}
+
+export function parseOfficialSearch(search, details = {}, limit = 5) {
   const metadata = new Map((details.items || []).map((item) => [item.id, item]));
   const seen = new Set();
   return (search.items || []).filter((item) => {
@@ -108,7 +128,7 @@ export function parseOfficialSearch(search, details = {}) {
         || ["live", "upcoming"].includes(item.snippet?.liveBroadcastContent) || !item.snippet?.title) return false;
     seen.add(id);
     return true;
-  }).slice(0, 5).map((item) => {
+  }).slice(0, limit).map((item) => {
     const id = item.id.videoId, snippet = item.snippet;
     return {video_id: id, url: `https://www.youtube.com/watch?v=${id}`,
       title: String(snippet.title).slice(0, 300), artist: "", channel: String(snippet.channelTitle || "").slice(0, 150),

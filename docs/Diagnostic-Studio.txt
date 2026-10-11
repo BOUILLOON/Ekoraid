@@ -1,0 +1,22 @@
+DIAGNOSTIC DU STUDIO DE FANNY
+
+Double-cliquez sur Diagnostic-Studio.cmd, dans le dossier contenant Studio-Fanny.exe.
+Il ouvre un rapport local sans mot de passe ni cle privee, sans demarrer le studio.
+Vous pouvez transmettre ce rapport pour obtenir de l'aide.
+
+Si vous lisez seulement ce guide, Windows a peut-etre bloque le programme avant
+qu'il puisse creer son rapport, ou le dossier extrait est incomplet.
+1. Gardez votre ancienne installation et le dossier personnel StudioFanny.
+2. Telechargez le ZIP depuis la release officielle :
+https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip
+3. Faites Extraire tout dans un nouveau dossier. Gardez _internal avec l'EXE.
+4. Relancez Diagnostic-Studio.cmd. Aucun terminal ni droit administrateur requis.
+
+Pour l'avertissement exact "Windows a protege votre ordinateur" sur ce ZIP
+officiel : Informations complementaires, puis Executer quand meme.
+Ne desactivez pas Defender et ne changez pas la strategie PowerShell.
+Si Windows signale un autre blocage, gardez son message exact pour le diagnostic.
+
+La collecte publique des invites continue pendant ces operations :
+https://bouilloon.github.io/Ekoraid/
+Ne partagez jamais .env.local ou une sauvegarde privee du studio.

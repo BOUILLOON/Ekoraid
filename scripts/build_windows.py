@@ -232,11 +232,12 @@ yt-dlp et yt-dlp-ejs : versions épinglées de requirements.txt, composants Java
     solver = directory / "_internal" / "yt_dlp_ejs" / "yt" / "solver" / "core.min.js"
     if not solver.is_file():
         raise RuntimeError("Bundled yt-dlp-ejs solver resources are missing; publishing is blocked.")
-    for name in ("README.md", "docs/INSTALLATION.md", "docs/ADMINISTRATION.md"):
+    for name in ("README.md", "docs/INSTALLATION.md", "docs/ADMINISTRATION.md", "docs/Diagnostic-Studio.txt"):
         source = ROOT / name
         if source.is_file():
             (directory / "Aide").mkdir(exist_ok=True)
             shutil.copy2(source, directory / "Aide" / source.name)
+    shutil.copy2(ROOT / "scripts" / "packaging" / "Diagnostic-Studio.cmd", directory / "Diagnostic-Studio.cmd")
     (directory / "LIRE-MOI.txt").write_text("STUDIO FANNY\n\n1. Extrayez tout ce dossier ZIP.\n2. Double-cliquez sur Studio-Fanny.exe.\n3. Au premier lancement, choisissez votre mot de passe dans la fenêtre.\n\nPython, Node.js et FFmpeg sont déjà intégrés. Le dossier Aide contient les guides.\nLa configuration privée et les musiques sont conservées dans votre profil Windows, hors de ce dossier.\n", encoding="utf-8")
     (directory / "build-info.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     check_bundle_files(directory)

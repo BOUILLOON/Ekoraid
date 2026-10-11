@@ -3,6 +3,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -181,12 +182,65 @@ def start(cfg):
         (cfg.data_dir / ".stop-requested").unlink(missing_ok=True)
 
 
+def _backup_summary(command, result):
+    """Only the documented inventory, never configuration or private keys."""
+    fields = ("archive", "created_at", "include_audio", "confidential", "file_count",
+              "uncompressed_bytes", "archive_bytes", "manifest_sha256", "home")
+    summary = {"command": command}
+    for field in fields:
+        if field in result:
+            value = result[field]
+            summary[field] = str(value) if isinstance(value, Path) else value
+    counts = result.get("counts", {})
+    summary["counts"] = {name: counts[name] for name in
+                         ("sources", "proposals", "guests", "votes", "photos", "audio_files") if name in counts}
+    if "missing_audio" in result:
+        value = result["missing_audio"]
+        summary["missing_audio"] = len(value) if isinstance(value, (list, tuple)) else value
+    return summary
+
+
+def _backup_command(args, parser):
+    # These operations must not initialize, load or migrate the selected current
+    # studio. They read only the explicitly supplied source/archive and target.
+    if args.surface:
+        parser.error("Ces commandes ne prennent pas de surface guest/admin.")
+    if args.command == "backup":
+        if args.home is None or args.destination is None:
+            parser.error("backup exige --home et --destination.")
+        from .backups import create_backup
+        result = create_backup(args.home, args.destination, include_audio=not args.without_audio)
+    elif args.command == "inspect-backup":
+        if args.archive is None:
+            parser.error("inspect-backup exige --archive.")
+        from .backups import inspect_backup
+        result = inspect_backup(args.archive)
+    else:
+        if args.archive is None or args.home is None:
+            parser.error("restore-backup exige --archive et --home vers un nouveau dossier vide.")
+        expected = args.expected_manifest_sha256
+        if expected is not None and not re.fullmatch(r"[a-f0-9]{64}", expected):
+            parser.error("L'empreinte de manifeste doit contenir 64 caractères SHA256 hexadécimaux.")
+        from .backups import restore_backup
+        result = restore_backup(args.archive, args.home, expected_manifest_sha256=expected)
+    print(json.dumps(_backup_summary(args.command, result), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main():
     parser=argparse.ArgumentParser(description="La playlist des 25 ans")
-    parser.add_argument("command",choices=["init","configure-admin","start","stop","serve","worker","doctor"])
+    parser.add_argument("command",choices=["init","configure-admin","start","stop","serve","worker","doctor",
+                                          "backup","inspect-backup","restore-backup"])
     parser.add_argument("surface",nargs="?",choices=["guest","admin"])
     parser.add_argument("--once",action="store_true",help="Worker : traiter au plus une tâche")
+    parser.add_argument("--home",type=Path,help="Sauvegarde : studio source ; restauration : nouveau dossier vide")
+    parser.add_argument("--destination",type=Path,help="Nouvelle archive ZIP de sauvegarde, hors du studio")
+    parser.add_argument("--archive",type=Path,help="Archive ZIP de sauvegarde à inspecter ou restaurer")
+    parser.add_argument("--without-audio",action="store_true",help="Sauvegarde : omettre les fichiers audio (inclus par défaut)")
+    parser.add_argument("--expected-manifest-sha256",help="Restauration : empreinte obtenue lors de l'inspection")
     args=parser.parse_args()
+    if args.command in {"backup", "inspect-backup", "restore-backup"}:
+        return _backup_command(args, parser)
     if args.command in {"init","configure-admin","start"}:
         initialize_local_config()
     if args.command=="configure-admin":

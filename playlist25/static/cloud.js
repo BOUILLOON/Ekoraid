@@ -160,7 +160,11 @@
     if (method === "GET" && route === "/api/search") {
       const query = (url.searchParams.get("q") || "").trim();
       if (query.length < 3 || query.length > 120) fail("Tapez entre 3 et 120 caractères pour chercher.", 422);
-      const result = await edge({query, guest_token: token});
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const limit = Number(url.searchParams.get("limit") || 5);
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 99 || !Number.isSafeInteger(limit) || limit < 1 || limit > 10)
+        fail("Page de recherche invalide.", 422);
+      const result = await edge({action: "search", query, guest_token: token, offset, limit});
       if (Array.isArray(result?.items)) result.items.forEach(rememberVideo);
       return result;
     }

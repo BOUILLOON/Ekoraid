@@ -100,7 +100,17 @@ assert.equal(calls.length, beforeInvalidAvatars);
 const search = await provider.request("/api/search?q=Dalida");
 assert.equal(search.items.length, 1);
 assert.equal(calls.at(-1).body.guest_token, token);
+assert.equal(calls.at(-1).body.action, "search");
+assert.equal(calls.at(-1).body.offset, 0);
+assert.equal(calls.at(-1).body.limit, 5);
 assert.equal(calls.at(-1).options.credentials, "omit");
+await provider.request("/api/search?q=Dalida&offset=5&limit=5");
+assert.equal(calls.at(-1).body.offset, 5);
+assert.equal(calls.at(-1).body.limit, 5);
+const beforeInvalidSearchPage = calls.length;
+for (const suffix of ["offset=-1", "offset=100", "offset=1.5", "offset=9007199254740993", "limit=0", "limit=11", "limit=nope"])
+  await assert.rejects(provider.request(`/api/search?q=Dalida&${suffix}`), /Page de recherche invalide/);
+assert.equal(calls.length, beforeInvalidSearchPage);
 // Search is already real metadata. Adding its result must preserve duration
 // even when the watch endpoint is unavailable, without a redundant watch call.
 videoStatus = 503;

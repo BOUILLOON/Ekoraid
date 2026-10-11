@@ -42,6 +42,100 @@ def test_auth_and_session_separation(cfg):
     assert client.get('/api/dashboard').status_code==401
 
 
+def test_private_search_requires_admin_csrf_and_is_read_only(cfg,monkeypatch):
+    calls=[]
+    entry=analysis_fixture()['entries'][0]
+    def search(query,config,*,offset,limit):
+        calls.append((query,offset,limit))
+        return {'items':[copy.deepcopy(entry)],'has_more':True,'next_offset':11}
+    monkeypatch.setattr(providers,'search_page',search)
+    client=TestClient(create_admin_app(cfg))
+    assert client.post('/api/search',json={'query':'Dalida'}).status_code==401
+    client,headers=admin(cfg)
+    assert client.post('/api/search',json={'query':'Dalida'}).status_code==403
+    with db.connect(cfg) as conn:
+        before={name:conn.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in ('sources','proposals','jobs','votes')}
+    response=client.post('/api/search',json={'query':'  Dalida live  ','offset':6},headers=headers)
+    assert response.status_code==200,response.text
+    assert response.json()=={'items':[entry],'has_more':True,'next_offset':11}
+    assert calls==[('Dalida live',6,min(cfg.search_limit,10))]
+    with db.connect(cfg) as conn:
+        assert {name:conn.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in before}==before
+    for body in ({'query':'  '},{'query':'a\nb'},{'query':'Dalida','offset':True}):
+        assert client.post('/api/search',json=body,headers=headers).status_code==422
+    assert calls==[('Dalida live',6,min(cfg.search_limit,10))]
+    assert client.patch('/api/settings',json={'offline_mode':True},headers=headers).status_code==200
+    assert client.post('/api/search',json={'query':'Dalida'},headers=headers).status_code==503
+    assert calls==[('Dalida live',6,min(cfg.search_limit,10))]
+
+
+def test_private_search_reports_provider_failure_without_changing_proposal(cfg,monkeypatch):
+    def unavailable(*args,**kwargs):
+        raise providers.SourceError('La recherche YouTube est temporairement indisponible.',status=503)
+    monkeypatch.setattr(providers,'search_page',unavailable)
+    client,headers=admin(cfg)
+    result=client.post('/api/search',json={'query':'Dalida'},headers=headers)
+    assert result.status_code==503 and 'temporairement indisponible' in result.json()['detail']
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==0
+
+
+def test_manual_proposal_association_reverifies_metadata_preserves_author_votes_and_creates_no_job(cfg,monkeypatch):
+    with db.connect(cfg) as conn:
+        conn.execute('INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?)',('manual-owner','Camille',db.now()))
+        source=db.upsert_source(conn,{'title':'Demande sans lien','artist':'Dalida'})
+        proposal=conn.execute('INSERT INTO proposals(source_id,guest_id,state,sort_order,created_at) VALUES(?,?,?,?,?)',(source,'manual-owner','approved',27,db.now())).lastrowid
+        conn.execute('INSERT INTO votes(proposal_id,guest_id,created_at) VALUES(?,?,?)',(proposal,'manual-owner',db.now()))
+        original=dict(conn.execute('SELECT * FROM proposals WHERE id=?',(proposal,)).fetchone())
+    entry={**analysis_fixture()['entries'][0],'title':'Version studio exacte','artist':'Dalida','channel':'Chaîne officielle vérifiée','duration':226}
+    calls=[]
+    def analyze(url,config,mode=None):
+        calls.append((url,mode))
+        return {'kind':'video','entries':[copy.deepcopy(entry)],'warnings':[],'complete':True}
+    monkeypatch.setattr(providers,'analyze',analyze)
+    client,headers=admin(cfg)
+    # Metadata from a browser search may not forge the verified duration.
+    assert client.patch(f'/api/proposals/{proposal}',json={'url':entry['url'],'duration':1},headers=headers).status_code==422
+    result=client.patch(f'/api/proposals/{proposal}',json={'url':entry['url'],'title':entry['title'],'artist':'Dalida'},headers=headers)
+    assert result.status_code==200,result.text
+    assert calls==[(entry['url'],'video')]
+    item=result.json()['item']
+    assert item['duration']==226 and item['channel']=='Chaîne officielle vérifiée'
+    assert item['guest_id']=='manual-owner' and item['nickname']=='Camille' and item['votes']==1
+    assert item['state']=='approved' and item['sort_order']==27
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==0
+        assert conn.execute('SELECT title FROM sources WHERE id=?',(source,)).fetchone()[0]=='Demande sans lien'
+        saved=dict(conn.execute('SELECT * FROM proposals WHERE id=?',(proposal,)).fetchone())
+        assert all(saved[key]==original[key] for key in original if key!='source_id')
+
+
+def test_associating_existing_audio_keeps_both_original_files_and_prepared_metadata(cfg,monkeypatch):
+    entry={**analysis_fixture()['entries'][0],'title':'Titre de résultat YouTube','artist':'Artiste du résultat'}
+    with db.connect(cfg) as conn:
+        original_source=db.upsert_source(conn,{'title':'Ancienne demande et audio'})
+        prepared=db.upsert_source(conn,{**entry,'title':'Titre déjà corrigé','artist':'Artiste déjà corrigé','duration':210})
+        for source,filename in ((original_source,'original.mp3'),(prepared,'prepared.mp3')):
+            (cfg.audio_dir/filename).write_bytes(b'local fixture, must remain untouched')
+            conn.execute('UPDATE sources SET file_path=?,status=? WHERE id=?',(filename,'available',source))
+        proposal=conn.execute('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',(original_source,db.now())).lastrowid
+    monkeypatch.setattr(providers,'analyze',lambda *args,**kwargs:{'kind':'video','entries':[copy.deepcopy(entry)]})
+    monkeypatch.setattr('playlist25.library.rename_audio',lambda *args,**kwargs:pytest.fail('Associating a recording must not rename prepared files'))
+    client,headers=admin(cfg)
+    result=client.patch(f'/api/proposals/{proposal}',json={'url':entry['url'],'title':entry['title'],'artist':entry['artist']},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['item']['source_id']==prepared
+    assert result.json()['item']['title']=='Titre déjà corrigé'
+    assert result.json()['item']['artist']=='Artiste déjà corrigé'
+    assert any('Renommer dans la bibliothèque' in warning for warning in result.json()['warnings'])
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==0
+        assert conn.execute('SELECT file_path FROM sources WHERE id=?',(original_source,)).fetchone()[0]=='original.mp3'
+        assert conn.execute('SELECT file_path FROM sources WHERE id=?',(prepared,)).fetchone()[0]=='prepared.mp3'
+    assert (cfg.audio_dir/'original.mp3').read_bytes()==(cfg.audio_dir/'prepared.mp3').read_bytes()==b'local fixture, must remain untouched'
+
+
 @pytest.mark.parametrize('unknown_duration',[None,0])
 def test_dashboard_duration_counts_distinct_known_sources_and_reports_unknown(cfg,unknown_duration):
     with db.connect(cfg) as conn:

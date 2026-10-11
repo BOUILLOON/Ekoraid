@@ -43,6 +43,11 @@ class LoginInput(Input):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class SearchInput(Input):
+    query: str = Field(min_length=2, max_length=200)
+    offset: StrictInt = Field(default=0, ge=0)
+
+
 class ProposalPatch(Input):
     state: str | None = None
     title: str | None = Field(default=None, min_length=1, max_length=500)
@@ -537,6 +542,20 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                     item["playlist_source_ids"] = playlist_sources[url]
             return {"items": items}
 
+    @app.post("/api/search", dependencies=modifying)
+    def sources_search(request: Request, payload: SearchInput) -> dict[str, Any]:
+        query = _clean_text(payload.query, "La recherche")
+        if len(query) < 2:
+            raise HTTPException(422, "Saisissez au moins deux caractères pour rechercher un titre ou un artiste.")
+        rate_limit(request, "admin_search", 30, window=60)
+        with _connection(cfg) as conn:
+            _online(conn)
+            effective = _effective_cfg(conn, cfg)
+        try:
+            return providers.search_page(query, effective, offset=payload.offset, limit=min(cfg.search_limit, 10))
+        except ValueError as exc:
+            raise _provider_error(exc) from exc
+
     @app.patch("/api/proposals", dependencies=modifying)
     def proposals_update(payload: ProposalBatchPatch) -> dict[str, Any]:
         if payload.state not in ("pending", "approved", "rejected", "archived"):
@@ -630,12 +649,18 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             title = changes.get("title", source["title"])
             artist = changes.get("artist", source["artist"])
             if "title" in changes or "artist" in changes:
-                if _present(conn, cfg, source):
+                prepared = _present(conn, cfg, source)
+                if "url" in changes and prepared:
+                    # Choosing an existing recording must not rename its audio or
+                    # change the metadata shared by other proposals implicitly.
+                    if title != source["title"] or artist != source["artist"]:
+                        warnings.append("Le titre, l’artiste et le fichier de cette source déjà préparée sont conservés. Pour les changer, utilisez Renommer dans la bibliothèque.")
+                elif prepared and (title != source["title"] or artist != source["artist"]):
                     try:
                         library.rename_audio(conn, cfg, source_id, title, artist)
                     except (ValueError, OSError) as exc:
                         raise HTTPException(422, str(exc)) from exc
-                else:
+                elif not prepared:
                     conn.execute("UPDATE sources SET title=?,artist=? WHERE id=?", (title, artist, source_id))
             conn.execute("UPDATE proposals SET source_id=?,state=?,sort_order=? WHERE id=?",
                          (source_id, changes.get("state", proposal["state"]), changes.get("sort_order", proposal["sort_order"]), proposal_id))

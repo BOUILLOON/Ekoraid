@@ -4,19 +4,23 @@ Résultats obtenus le **11 octobre 2026**. Les tests de développement utilisent
 
 | Vérification | Résultat obtenu pour cette version |
 | --- | --- |
-| Suite Python | **295 tests réussis, 1 ignoré et 7 sous-tests**, en **20,92 s**. Le test ignoré exige PowerShell, absent de cet environnement Linux. La suite couvre les API, les permissions, les photos, les durées, les playlists proposées, les doublons et courses entre invités, les migrations, la file, les fichiers, les exports, la synchronisation et le lancement autonome sans console. |
-| Distribution Windows : tests locaux | **55 tests réussis et 1 ignoré** sous Linux, où PowerShell est absent. Le même groupe de tests réussit dans le workflow Windows, y compris l’analyse des scripts PowerShell. |
+| Suite Python | **393 tests réussis, 1 ignoré et 7 sous-tests**. Le test ignoré exige PowerShell, absent de cet environnement Linux. La suite couvre aussi la pagination, la recherche privée, les sauvegardes, les restaurations et le diagnostic sans interface. |
+| Distribution Windows : tests locaux | Les tests de distribution et de lancement sans console passent sous Linux. Les nouveaux parcours de sauvegarde, restauration, diagnostic et fenêtre sont également testés ; l’analyse PowerShell et l’exécutable compilé exigent le workflow Windows. |
 | Navigateur avec le vrai backend local | **59 vérifications réussies et 17 captures**, à 1 440 px et 390 px. API, SQLite, profils, doublons et courses entre invités, WAV généré et ZIP réellement utilisés ; métadonnées YouTube et lecteurs vidéo simulés. Aucune erreur JavaScript, console ou réseau, aucune requête extérieure inattendue. |
+| Recherche privée dans Chromium | **9 contrôles réussis** avec vraie API et SQLite temporaire. Authentification/CSRF, pagination, sélection provisoire et annulation, durée vérifiée côté serveur, conservation du propriétaire et des votes, doublon atomique. Métadonnées YouTube simulées, aucun worker ni audio téléchargé. |
+| Brouillons et actualisation dans Chromium | **8 contrôles réussis** avec vraie API et SQLite temporaire : résultats supplémentaires, brouillons après coupure/rechargement sans envoi automatique, réponse ancienne sans perte de nouvelle saisie, DOM/focus/sélection/défilement conservés et nouveaux morceaux affichés au clic. |
+| Sauvegarde et restauration | **35 tests dédiés réussis**, avec vrais ZIP/SQLite/WAV et fichiers malformés. Un lot de **20 001 fichiers** est sauvegardé, inspecté et restauré, avec toutes les empreintes comparées. Ce sont des fichiers de test, pas 20 001 musiques téléchargées. |
+| Diagnostic indépendant | **9 tests réussis** : configuration absente/invalide, base endommagée, chemin ou dossier inaccessible, métadonnées illisibles, ouverture sans Tk, absence de secrets et secours Notepad. |
 | Catalogue de 20 001 éléments dans Chromium | **14 vérifications réussies**, avec données et réponses API simulées. Pagination, recherche complète, sélection groupée, file, bibliothèque et pack vérifiés sans afficher tout le catalogue à la fois. |
 | Photos et durées dans Chromium | **11 vérifications ciblées réussies**, avec images générées et API simulée : JPEG/WebP, recadrage, annulation, enregistrement, retrait, identité conservée, durées distinctes et inconnues. |
 | Synchronisation cloud | **16 tests réussis et 7 sous-tests**, avec snapshots simulés. Conservation des identifiants, corrections, votes, retraits et photos ; récupération de gros catalogues par lots. |
 | PostgreSQL 16 isolé | Migration appliquée **deux fois** avec succès ; permissions, profils, durées, identifiants, propriétaires, votes, propositions illimitées et catalogue de **20 001 propositions** contrôlés. |
-| Parseur et adaptateur cloud | Tests Node réussis, avec réponses réseau simulées. |
-| Fonction de recherche Edge | Vérification Deno réussie ; **1 test en 9 étapes** réussi, avec réponses réseau simulées. |
+| Parseur et adaptateur cloud | Tests Node réussis, avec réponses réseau simulées, y compris pagination et exécution du handler Edge de production après transformation TypeScript. |
+| Fonction de recherche Edge | Nouvelle fonction déployée seule, sans migration SQL ; sa compilation et deux lots de recherche sont confirmés par de vraies réponses HTTP **200**. Les tests Deno historiques portaient sur la version précédente ; aucun nouveau lancement Deno local n’est revendiqué. |
 | Supabase réel | Mise à jour SQL, huit RPC concernées et fonction Edge installées et contrôlées. La comparaison avec la sauvegarde confirme que les identifiants, propriétaires et votes existants sont conservés ; propositions illimitées avec `max_proposals=0`. |
 | Recherche YouTube réelle | HTTP **200** pour une recherche de morceaux et pour les métadonnées d’une vidéo précise ; cette dernière renvoie une durée de **143 s**, via `youtube-public-search-exact-video`. Aucun audio téléchargé. |
 | Durées des propositions existantes | Durées réelles complétées pour **27 sources vidéo**, uniquement lorsque leur durée était absente. **7 vidéos non résolues** et les demandes manuelles sans source restent inconnues. Identifiants et propriétaires conservés ; titres, artistes, états, ordre et votes non modifiés. |
-| Interface publiée avec Supabase réel | Le dossier exact `_site` servi localement a reçu de vraies réponses Supabase dans Chromium à **1 440 px et 390 px** : **33 propositions publiques**, recherche « Dalida » avec **5 résultats réels et leurs durées**, aucune erreur JavaScript ni débordement. Aucun invité, proposition ou vote de test créé. |
+| Interface construite avec Supabase réel | Le dossier exact `_site` servi localement a reçu de vraies réponses Supabase dans Chromium à **1 440 px et 390 px** : **81 propositions publiques**, recherche « Dalida » avec **5 puis 10 résultats réels** au clic, aucune erreur JavaScript ni débordement. Aucun invité, proposition ou vote de test créé. |
 | GitHub Pages | Déploiement [38169643565](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169643565) **réussi**, commit `9ba3307`. Le site inclut la détection de doublons avant ajout et le téléchargement direct du studio Windows corrigé. |
 | Exécutable Windows autonome | Workflow [38169483844](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169483844) **réussi**, commit `cc08e9e`. Les **12 contrôles de l’application compilée** ont réussi sur Windows-2025 avec Python 3.12.10, dont premier démarrage et lancement configuré avec entrées/sorties standard absentes ; la [release stable `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) est publiée. |
 
@@ -37,7 +41,7 @@ Le test navigateur démarre les services sur des ports locaux libres, avec une b
 - Création du partage ZIP, QR, expiration de dix minutes, téléchargement identique sur un second navigateur mobile et révocation immédiate. Le réseau privé est **simulé sur loopback**, avec conservation de l’en-tête Host ; l’autorisation et les octets du ZIP passent par le vrai backend. Ce contrôle ne constitue pas un transfert entre appareils physiques sur Wi-Fi.
 - Interface lisible à 1 440 px et 390 px, administration et audio absents de la surface publique, routes privées exigeant une session.
 
-Rapport et 17 captures : `/tmp/playlist25-browser-xAl5lD`. Ces fichiers sont des artefacts de l’environnement de test, pas des données publiées sur le site. Le précédent rapport de 51 vérifications et 15 captures reste dans `/tmp/playlist25-browser-z5iWqu`.
+Rapport actualisé et 17 captures : `/tmp/playlist25-browser-jntTAl`. Les contrôles privés ciblés sont dans `/tmp/playlist25-admin-search-Ue2Db8` et ceux des brouillons/actualisations dans `/tmp/playlist25-guest-refresh-Iom7BP`. Ces fichiers sont des artefacts de l’environnement de test, pas des données publiées sur le site.
 
 ## Gros catalogues, photos et durées : essais ciblés
 
@@ -60,6 +64,8 @@ Commandes de reproduction, depuis la racine du projet :
 ```bash
 .venv/bin/python -m pytest -q
 node tests/browser-smoke.cjs
+node tests/browser-admin-search.cjs
+node tests/browser-guest-refresh.cjs
 node cloud/test_search.mjs
 node cloud/test_adapter.mjs
 .venv/bin/python cloud/test_sync.py
@@ -79,11 +85,13 @@ Les contrôles avec la clé publique obtiennent HTTP **200** pour les sessions e
 
 Après une sauvegarde privée, les durées de **27 vidéos existantes** ont été récupérées par leur identifiant exact. La mise à jour SQL a écrit uniquement `duration`, avec la condition `duration IS NULL`. La comparaison confirme les mêmes identifiants et propriétaires avant/après ; titres, artistes, états, ordre et votes n’ont pas été écrits. Les **7 vidéos non résolues** restent sans durée, comme les demandes manuelles non associées à une source. Aucun audio n’a été téléchargé pour compléter ces métadonnées.
 
-Le dossier exact `_site` destiné au site publié a également été servi localement et contrôlé dans Chromium à **1 440 px et 390 px**. L’interface affiche les **33 propositions publiques** alors présentes et reçoit **5 résultats réels** pour « Dalida », avec durées. Sessions, catalogue et recherche répondent HTTP **200**, sans création d’identité, de proposition ou de vote de test. Aucun débordement horizontal ni erreur JavaScript ou console n’a été relevé. Pour utiliser le transport réseau de cet environnement, les requêtes Supabase originales ont été transmises par Python/httpx via le proxy normal, avec vérification TLS active. Rapport et captures : `/tmp/playlist25-live-transport-FsNBr5`.
+Le dossier exact `_site` destiné au site publié a également été servi localement et contrôlé dans Chromium à **1 440 px et 390 px**. L’interface affiche les **81 propositions publiques** alors présentes et reçoit **5 puis 10 résultats réels** pour « Dalida », avec durées, en cliquant sur « Plus de résultats ». Sessions, catalogue et recherche répondent HTTP **200**, sans création d’identité, de proposition ou de vote de test. Aucun débordement horizontal ni erreur JavaScript ou console n’a été relevé. Pour utiliser le transport réseau de cet environnement, les requêtes Supabase originales ont été transmises par Python/httpx via le proxy normal, avec vérification TLS active. Rapport et captures : `/tmp/playlist25-live-transport-vzA2Nf`.
 
 Le site public est à <https://bouilloon.github.io/Ekoraid/>. Le succès du workflow Pages prouve le déploiement ; l’ouverture directe de ce domaine depuis l’environnement Codex reste bloquée par son proxy avant toute réponse du site. Le contrôle de l’interface construite avec le backend Supabase réel ne constitue donc pas une visite directe de cette adresse. Les services gratuits restent à vérifier avant la soirée.
 
 ## Application Windows autonome publiée
+
+La livraison `.2` ci-dessous constitue le contrôle natif précédent ; les nouvelles fonctions sont testées localement et leur livraison `.3` exige un nouveau passage du workflow Windows avant publication.
 
 La [release `studio-windows-v2026.10.11.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) fournit [Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), de **150 550 195 octets** ; la vérification HEAD du lien public a répondu HTTP **200**. Le workflow [38169483844](https://github.com/BOUILLOON/Ekoraid/actions/runs/38169483844), commit `cc08e9e274ded8510009e02a7e26220d116a5a17`, a construit et réellement exécuté l’application compilée sur **Windows-2025**, avec **Python 3.12.10**. Le rapport public `windows-smoke.json`, joint à la release, confirme ces résultats. SHA-256 de l’archive : `08353a176b714aa0e88f54b196116f1573bccfaead3e6df7c73c16b6ae117bf8`.
 

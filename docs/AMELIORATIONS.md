@@ -4,11 +4,23 @@ Ces idées complètent les fonctions déjà présentes : recherche, propositions
 
 Les corrections livrées portent sur le démarrage Windows sans console et l’indication des morceaux déjà proposés avant l’ajout sur le site public. Les propositions et votes doivent rester conservés pendant toutes les évolutions ; aucune idée ci-dessous ne nécessite de limiter le nombre total de morceaux des invités.
 
+## Évolutions retenues pour cette livraison
+
+- **Plus de résultats** : un bouton charge le lot suivant quand le fournisseur dispose d’autres résultats.
+- **Brouillons locaux** : recherche, lien et demande textuelle restent sur l’appareil après une coupure ou un rechargement, sans envoi automatique.
+- **Actualisation discrète** : les cartes existantes sont actualisées en conservant le défilement et le focus ; les nouveaux morceaux se consultent avec un bouton.
+- **Repères de versions** : live, reprise, remix et instrumental sont signalés d’après le titre. Ces indications restent à vérifier à l’écoute.
+- **Recherche dans le studio** : l’éditeur d’une demande permet de chercher et de choisir sa vidéo, puis de sauvegarder explicitement ce choix.
+- **Sauvegarde et restauration** : les boutons de la fenêtre Windows enregistrent une archive privée et la restaurent dans une nouvelle installation. L’ancienne reste intacte et la collecte publique n’est jamais remplacée par une sauvegarde locale.
+- **Diagnostic sans fenêtre** : `Diagnostic-Studio.cmd`, près de l’exécutable, ouvre un rapport sans mot de passe ni clé privée.
+
+Le [guide d’administration](ADMINISTRATION.md) détaille leur utilisation. Les idées restantes ci-dessous restent des propositions.
+
 ## Les trois prochaines priorités proposées
 
 1. **Un parcours d’organisation guidé** : récupérer les idées → retrouver les versions → choisir → préparer → récupérer le ZIP, avec une progression et un bouton pour l’étape suivante.
-2. **Une recherche intégrée pour les demandes manuelles** : dans « Modifier », chercher le morceau et choisir la vidéo sans devoir copier un lien depuis un autre site.
-3. **Une sauvegarde et une restauration simples** : sauvegarde de la collecte et de la configuration avant mise à jour, avec audio optionnel et aperçu avant restauration.
+2. **Recherche intégrée pour les demandes manuelles — retenue** : dans « Modifier », chercher le morceau et choisir la vidéo sans devoir copier un lien depuis un autre site.
+3. **Sauvegarde et restauration simples — retenues** : archive privée de la configuration, de la base et des fichiers audio, avec aperçu avant restauration vers une nouvelle installation.
 
 ## Pour les invités
 

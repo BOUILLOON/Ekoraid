@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 import webbrowser
 
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -102,6 +104,41 @@ def adoption_environment(home: Path) -> dict[str, str]:
     return environment
 
 
+def launch_installation(home: Path):
+    """Open an adopted studio with valid handles, including windowed Windows EXEs."""
+    home = Path(home).resolve()
+    remember_installation(home)
+    command = ([sys.executable] if getattr(sys, "frozen", False) else
+               [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / "studio_entry.py")])
+    options = {"env": adoption_environment(home), "cwd": str(home),
+               "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+               "stderr": subprocess.DEVNULL, "close_fds": True}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(command, **options)
+
+
+def backup_summary(info: dict) -> str:
+    """Describe only archive inventory, never private configuration values."""
+    counts = info["counts"]
+    date = datetime.fromisoformat(info["created_at"].replace("Z", "+00:00")).astimezone().strftime("%d/%m/%Y à %H:%M")
+    summary = (f"Date : {date}\n"
+            f"{counts['proposals']} proposition(s), {counts['guests']} invité(s), {counts['votes']} vote(s)\n"
+            f"{counts['photos']} photo(s), {counts['audio_files']} fichier(s) audio\n"
+            + ("Sauvegarde avec les fichiers audio présents sur ce PC." if info["include_audio"] else
+               "Sauvegarde des données et de la configuration, sans les fichiers audio."))
+    if info.get("missing_audio", 0):
+        summary += f"\nFichiers audio déjà absents de ce PC : {info['missing_audio']}."
+    return summary
+
+
+def restored_home(parent: Path) -> Path:
+    parent = Path(parent).resolve()
+    if not parent.is_dir():
+        raise ValueError("Choisissez un dossier existant pour créer le studio restauré.")
+    return parent / f"StudioFanny-restaure-{datetime.now():%Y-%m-%d_%H-%M-%S}-{uuid4().hex[:6]}"
+
+
 def service_command(*arguments: str) -> list[str]:
     from .__main__ import service_command as command
     return command(*arguments)
@@ -114,7 +151,8 @@ class StudioWindow:
         self.tk, self.ttk = tk, ttk
         self.window = tk.Tk()
         self.window.title("Studio de Fanny")
-        self.window.geometry("600x560")
+        main_height = min(720, max(400, self.window.winfo_screenheight() - 100))
+        self.window.geometry(f"620x{main_height}")
         self.window.minsize(530, 510)
         self.window.configure(bg="#faf9f5")
         self.runner = None
@@ -130,8 +168,25 @@ class StudioWindow:
         style.configure("TButton", font=("Segoe UI", 10), padding=(14, 10))
         style.configure("Primary.TButton", background="#3934a7", foreground="white")
         style.map("Primary.TButton", background=[("active", "#292574")])
-        self.panel = ttk.Frame(self.window, padding=28)
-        self.panel.pack(fill="both", expand=True)
+        container = ttk.Frame(self.window)
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, bg="#faf9f5", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.panel = ttk.Frame(canvas, padding=28)
+        panel_id = canvas.create_window((0, 0), window=self.panel, anchor="nw")
+        self.panel.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(panel_id, width=event.width))
+        def scroll(event):
+            if event.widget.winfo_toplevel() != self.window:
+                return
+            delta = getattr(event, "delta", 0)
+            direction = -1 if getattr(event, "num", None) == 4 else 1 if getattr(event, "num", None) == 5 else -1 if delta > 0 else 1 if delta < 0 else 0
+            canvas.yview_scroll(direction, "units")
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.window.bind_all(event, scroll, add="+")
         ttk.Label(self.panel, text="Les 25 ans de Fanny", style="Title.TLabel").pack(anchor="w")
         ttk.Label(self.panel, text="Votre studio privé pour préparer la musique.").pack(anchor="w", pady=(10, 20))
         self.status = tk.StringVar(value="Le site des invités reste disponible même quand ce studio est fermé.")
@@ -143,6 +198,9 @@ class StudioWindow:
         ttk.Button(self.panel, text="Ouvrir mes fichiers", command=self.open_files).pack(fill="x", pady=5)
         ttk.Button(self.panel, text="Configurer la connexion", command=lambda: self.configure("cloud")).pack(fill="x", pady=5)
         ttk.Button(self.panel, text="Changer mon mot de passe", command=lambda: self.configure("password")).pack(fill="x", pady=5)
+        ttk.Button(self.panel, text="Sauvegarder mon studio", command=self.backup).pack(fill="x", pady=5)
+        ttk.Button(self.panel, text="Restaurer une sauvegarde", command=self.restore).pack(fill="x", pady=5)
+        ttk.Button(self.panel, text="Ouvrir le diagnostic", command=self.diagnostic).pack(fill="x", pady=5)
         ttk.Button(self.panel, text="Reprendre une ancienne installation", command=self.adopt).pack(fill="x", pady=5)
         ttk.Label(self.panel, text="Propositions et votes : aucun effacement pendant une mise à jour.\nLaissez cette fenêtre ouverte pendant la préparation.", wraplength=520).pack(anchor="w", pady=(16, 0))
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -197,8 +255,34 @@ class StudioWindow:
         dialog.title("Configurer le studio de Fanny")
         dialog.transient(self.window)
         dialog.grab_set()
-        frame = self.ttk.Frame(dialog, padding=25)
-        frame.pack(fill="both", expand=True)
+        width = min(600, max(420, self.window.winfo_screenwidth() - 80))
+        height = min(680, max(320, self.window.winfo_screenheight() - 100))
+        left = max(0, (self.window.winfo_screenwidth() - width) // 2)
+        top = max(10, (self.window.winfo_screenheight() - height) // 2 - 20)
+        dialog.geometry(f"{width}x{height}+{left}+{top}")
+        dialog.minsize(min(560, width), min(400, height))
+        dialog.maxsize(self.window.winfo_screenwidth(), max(height, self.window.winfo_screenheight() - 80))
+        actions = self.ttk.Frame(dialog, padding=(25, 12, 25, 20))
+        actions.pack(side="bottom", fill="x")
+        body = self.ttk.Frame(dialog)
+        body.pack(fill="both", expand=True)
+        canvas = self.tk.Canvas(body, bg="#faf9f5", highlightthickness=0)
+        scrollbar = self.ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = self.ttk.Frame(canvas, padding=25)
+        frame_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(frame_id, width=event.width))
+        def scroll(event):
+            if event.widget.winfo_toplevel() != dialog:
+                return
+            delta = getattr(event, "delta", 0)
+            direction = -1 if getattr(event, "num", None) == 4 else 1 if getattr(event, "num", None) == 5 else -1 if delta > 0 else 1 if delta < 0 else 0
+            canvas.yview_scroll(direction, "units")
+        for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            dialog.bind(event, scroll, add="+")
         self.ttk.Label(frame, text="Bienvenue dans le studio" if kind == "first" else "Votre configuration privée", style="Title.TLabel").pack(anchor="w", pady=(0, 15))
         passwords = []
         key_var = self.tk.StringVar()
@@ -220,7 +304,7 @@ class StudioWindow:
             self.ttk.Label(frame, text="Clé privée — laisser vide pour conserver la connexion existante").pack(anchor="w", pady=(10, 4))
             self.ttk.Entry(frame, textvariable=key_var, show="•", width=48).pack(fill="x")
         feedback = self.tk.StringVar()
-        self.ttk.Label(frame, textvariable=feedback, wraplength=500, foreground="#85364d").pack(anchor="w", pady=12)
+        self.ttk.Label(actions, textvariable=feedback, wraplength=500, foreground="#85364d").pack(anchor="w", pady=(0, 10))
 
         def done(error):
             self.busy = False
@@ -257,8 +341,15 @@ class StudioWindow:
 
             threading.Thread(target=task, daemon=True).start()
 
-        button = self.ttk.Button(frame, text="Enregistrer et ouvrir le studio", style="Primary.TButton", command=save)
+        button = self.ttk.Button(actions, text="Enregistrer et ouvrir le studio", style="Primary.TButton", command=save)
         button.pack(fill="x")
+        if kind == "first":
+            def restore_existing():
+                if self.busy:
+                    return
+                dialog.destroy()
+                self.restore()
+            self.ttk.Button(actions, text="Restaurer une sauvegarde", command=restore_existing).pack(fill="x", pady=(10, 0))
         dialog.protocol("WM_DELETE_WINDOW", lambda: None if self.busy else dialog.destroy())
 
     def start(self):
@@ -344,7 +435,14 @@ class StudioWindow:
     def stop(self, after=None):
         if self.busy:
             return
-        if not self.runner or self.runner.poll() is not None:
+        running = bool(self.runner and self.runner.poll() is None)
+        recorded = False
+        if not running:
+            try:
+                recorded = (current_settings().data_dir / "processes.json").is_file()
+            except (ValueError, OSError):
+                pass
+        if not running and not recorded:
             if after:
                 after()
             return
@@ -354,12 +452,14 @@ class StudioWindow:
         self.stop_button.configure(state="disabled")
 
         def task():
-            options = {"cwd": str(ROOT), "stdout": self.log, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL}
+            options = {"cwd": str(ROOT), "stdout": self.log if self.log else subprocess.DEVNULL,
+                       "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL}
             if os.name == "nt":
                 options["creationflags"] = subprocess.CREATE_NO_WINDOW
             try:
                 subprocess.run(service_command("stop"), **options, timeout=60, check=True)
-                self.runner.wait(timeout=10)
+                if self.runner:
+                    self.runner.wait(timeout=10)
                 error = None
             except (OSError, subprocess.SubprocessError):
                 error = "L'arrêt n'est pas terminé. Vérifiez le diagnostic avant de relancer le studio."
@@ -382,6 +482,125 @@ class StudioWindow:
         if after:
             after()
 
+    def _backup_task(self, message, task, done):
+        self.busy = True
+        self.open_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.status.set(message)
+        def run():
+            try:
+                result, error = task(), None
+            except (ValueError, OSError) as exc:
+                result, error = None, str(exc)
+            except Exception:
+                result, error = None, "L'opération n'a pas pu se terminer. Les données de votre installation sont conservées."
+            self.post(done, result, error)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _backup_idle(self):
+        self.busy = False
+        self.open_button.configure(state="normal")
+        self.stop_button.configure(state="normal" if self.runner and self.runner.poll() is None else "disabled")
+
+    def backup(self):
+        from tkinter import filedialog
+        from .backups import create_backup
+        if self.busy:
+            return
+        selected = filedialog.asksaveasfilename(
+            title="Sauvegarder mon studio — configuration privée, données et audio",
+            initialfile=f"StudioFanny-sauvegarde-{datetime.now():%Y-%m-%d_%H-%M-%S}.zip",
+            defaultextension=".zip", filetypes=[("Sauvegarde du studio", "*.zip")], parent=self.window)
+        if not selected:
+            return
+        destination = Path(selected).resolve()
+        resume = bool(self.runner and self.runner.poll() is None)
+        def done(result, error):
+            from tkinter import messagebox
+            self._backup_idle()
+            if error:
+                self.status.set("La sauvegarde n'a pas été créée. Votre studio est conservé.")
+                messagebox.showerror("Sauvegarder mon studio", error, parent=self.window)
+                if resume:
+                    self.start()
+                return
+            self.status.set("Sauvegarde enregistrée.")
+            messagebox.showinfo("Sauvegarde terminée", backup_summary(result) +
+                                f"\n\nArchive : {result['archive']}\nCette archive contient votre configuration privée. Conservez-la dans un endroit sûr.", parent=self.window)
+            if resume:
+                self.start()
+        self.stop(after=lambda: self._backup_task("Sauvegarde du studio et des fichiers audio…",
+                                                lambda: create_backup(ROOT, destination, include_audio=True), done))
+
+    def restore(self):
+        from tkinter import filedialog
+        from .backups import inspect_backup
+        if self.busy:
+            return
+        selected = filedialog.askopenfilename(title="Choisissez une sauvegarde du studio", filetypes=[("Sauvegarde du studio", "*.zip")], parent=self.window)
+        if not selected:
+            return
+        archive = Path(selected).resolve()
+        self._backup_task("Vérification de la sauvegarde…", lambda: inspect_backup(archive),
+                          lambda info, error: self._restore_preview(archive, info, error))
+
+    def _restore_preview(self, archive, info, error):
+        from tkinter import filedialog, messagebox
+        from .backups import restore_backup
+        self._backup_idle()
+        if error:
+            self.status.set("Cette sauvegarde n'a pas pu être ouverte. Votre studio est conservé.")
+            messagebox.showerror("Restaurer une sauvegarde", error, parent=self.window)
+            return
+        selected = filedialog.askdirectory(title="Choisissez où créer le nouveau studio restauré", parent=self.window)
+        if not selected:
+            self.status.set("Restauration annulée. Votre studio est conservé.")
+            return
+        try:
+            home = restored_home(Path(selected))
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Restaurer une sauvegarde", str(exc), parent=self.window)
+            return
+        summary = backup_summary(info) + f"\n\nNouveau studio : {home}\nLa restauration utilisera le mot de passe et la connexion de cette sauvegarde. Votre installation actuelle restera conservée."
+        if not messagebox.askokcancel("Restaurer cette sauvegarde ?", summary, parent=self.window):
+            self.status.set("Restauration annulée. Votre studio est conservé.")
+            return
+        def done(result, failure):
+            self._backup_idle()
+            if failure:
+                self.status.set("La restauration n'a pas terminé. Votre installation actuelle est conservée.")
+                messagebox.showerror("Restaurer une sauvegarde", failure, parent=self.window)
+                return
+            if result.get("missing_audio", 0):
+                messagebox.showinfo("Studio restauré", f"{result['missing_audio']} fichier(s) audio étaient absents de cette sauvegarde et restent à préparer.\nPropositions, votes et photos ont été conservés.", parent=self.window)
+            try:
+                launch_installation(Path(result["home"]))
+            except (ValueError, OSError):
+                self.status.set("Le nouveau studio a été restauré. Fermez cette fenêtre puis rouvrez l'application pour l'utiliser.")
+                messagebox.showinfo("Studio restauré", "La sauvegarde est restaurée et votre installation actuelle reste conservée. Le nouveau studio n'a pas pu s'ouvrir automatiquement ; fermez cette fenêtre et relancez l'application.", parent=self.window)
+                return
+            self.destroy()
+        self.stop(after=lambda: self._backup_task("Restauration dans un nouveau studio…",
+                                                lambda: restore_backup(archive, home, expected_manifest_sha256=info["manifest_sha256"]), done))
+
+    def diagnostic(self):
+        from tkinter import messagebox
+        from .diagnostics import open_diagnostic, write_diagnostic
+        if self.busy:
+            return
+        def done(path, error):
+            self._backup_idle()
+            if error:
+                self.status.set("Le diagnostic n'a pas pu être créé. Votre studio est conservé.")
+                messagebox.showerror("Ouvrir le diagnostic", "Le rapport local n'a pas pu être créé. Vérifiez que le dossier de l'application est accessible.", parent=self.window)
+                return
+            try:
+                open_diagnostic(path)
+            except OSError:
+                messagebox.showinfo("Diagnostic créé", f"Le diagnostic est enregistré ici :\n{path}\n\nL'ouverture automatique n'a pas abouti.", parent=self.window)
+            self.status.set("Diagnostic local créé. Il ne contient aucun mot de passe ni clé privée.")
+        self._backup_task("Préparation du diagnostic local…", lambda: write_diagnostic(ROOT), done)
+
     def adopt(self):
         from tkinter import filedialog, messagebox
         if self.busy or self.runner and self.runner.poll() is None:
@@ -392,10 +611,11 @@ class StudioWindow:
             return
         try:
             home = Path(selected).resolve()
-            remember_installation(home)
-            environment = adoption_environment(home)
-            command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / "studio_entry.py")]
-            subprocess.Popen(command, env=environment, cwd=str(home))
+            if home == ROOT.resolve():
+                messagebox.showinfo("Studio de Fanny", "Cette installation est déjà sélectionnée. Le studio s'ouvre avec vos données actuelles.", parent=self.window)
+                self.start()
+                return
+            launch_installation(home)
             self.destroy()
         except (ValueError, OSError) as exc:
             messagebox.showerror("Studio de Fanny", str(exc), parent=self.window)

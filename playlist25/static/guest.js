@@ -4,6 +4,7 @@
   const $ = (selector) => document.querySelector(selector);
   const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, searchItems: [], catalogueSerial: 0, linkCheckTimer: null, lastCheckedLink: "", proposalPending: false, manualMatchResolve: null, withdrawing: null, withdrawalPending: false, profileSerial: 0, profileAvatar: "", profileDirty: false, profileProcessing: false, profilePending: false, proposalScopeResolve: null };
   const PAGE_SIZE = 48;
+  Object.assign(state, { catalogueItems: [], catalogueOrder: [], pendingNewCount: 0, searchQuery: "", searchNextOffset: null, searchHasMore: false, searchLoading: false, entry: "search", restoringDraft: false });
   const sourceMatches = new Map(), manualMatches = new Map();
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
@@ -30,10 +31,86 @@
     return data;
   }
   function message(target, text, type = "info") {
-    target.replaceChildren();
-    if (text) target.append(el("p", `feedback ${type}`, text));
+    reconcile(target, text ? [el("p", `feedback ${type}`, text)] : []);
   }
   function toast(text) { const node = el("div", "toast", text); $("#toasts").append(node); window.setTimeout(() => node.remove(), 4500); }
+  const DRAFT_KEY = `playlist25.guest-drafts.v1:${window.location.pathname}`;
+  const DRAFT_FIELDS = { search: ["search-input"], link: ["link-input"], manual: ["manual-title", "manual-artist"] };
+  function saveDrafts() {
+    if (state.restoringDraft) return;
+    const fields = {}; Object.values(DRAFT_FIELDS).flat().forEach((id) => { fields[id] = $(`#${id}`).value; });
+    try {
+      if (Object.values(fields).some(Boolean)) localStorage.setItem(DRAFT_KEY, JSON.stringify({ fields, entry: state.entry }));
+      else localStorage.removeItem(DRAFT_KEY);
+      $("#draft-status").textContent = "Vos saisies restent en brouillon sur cet appareil. Elles ne sont envoyées que lorsque vous ajoutez une idée.";
+    } catch { $("#draft-status").textContent = "Vos saisies restent sur cette page ; ce navigateur ne permet pas de garder le brouillon après fermeture."; }
+  }
+  function restoreDrafts() {
+    state.restoringDraft = true;
+    try {
+      const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+      if (draft && typeof draft.fields === "object" && draft.fields) {
+        Object.values(DRAFT_FIELDS).flat().forEach((id) => { if (typeof draft.fields[id] === "string") $(`#${id}`).value = draft.fields[id].slice(0, $(`#${id}`).maxLength); });
+        if (Object.keys(DRAFT_FIELDS).includes(draft.entry)) setEntry(draft.entry);
+        if (Object.values(DRAFT_FIELDS).flat().some((id) => $(`#${id}`).value)) $("#draft-status").textContent = "Votre brouillon a été retrouvé sur cet appareil. Vous pouvez continuer ; rien n’a été envoyé.";
+      }
+    } catch { /* A blocked or damaged storage never prevents music proposals. */ }
+    finally { state.restoringDraft = false; }
+  }
+  function submittedDraft(button, body) {
+    const mode = body.kind === "manual" ? "manual" : button.closest("#link-form") ? "link" : "search";
+    return { mode, values: DRAFT_FIELDS[mode].map((id) => $(`#${id}`).value) };
+  }
+  function clearSubmittedDraft(draft) {
+    const ids = DRAFT_FIELDS[draft.mode];
+    // An older response must never erase the next idea the guest has started typing.
+    if (!ids.every((id, index) => $(`#${id}`).value === draft.values[index])) return;
+    ids.forEach((id) => { $(`#${id}`).value = ""; });
+    if (draft.mode === "search") { state.searchItems = []; state.searchHasMore = false; state.searchLoading = false; state.searchNextOffset = null; state.searchQuery = ""; state.searchSerial++; state.searchController?.abort(); window.clearTimeout(state.searchTimer); $("#search-more-status").textContent = ""; $("#search-form button").disabled = !!state.session?.settings?.offline_mode; renderSearchResults(); }
+    saveDrafts();
+  }
+  function domKey(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return node.nodeType === Node.TEXT_NODE ? "text" : "other";
+    for (const key of ["proposalId", "searchId", "previewId", "withdrawId", "locateId", "existingVoteId", "addVideoId"]) if (node.dataset[key]) return `${node.tagName}:${key}:${node.dataset[key]}`;
+    return `${node.tagName}:${node.classList[0] || ""}`;
+  }
+  function reconcile(parent, incoming) {
+    const available = Array.from(parent.childNodes), retained = new Set();
+    incoming.forEach((fresh, index) => {
+      const key = domKey(fresh), old = available.find((node) => !retained.has(node) && domKey(node) === key);
+      const node = old || fresh; retained.add(node);
+      if (old && old.nodeType === Node.TEXT_NODE) { if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue; }
+      else if (old && old.dataset.renderSignature !== fresh.dataset.renderSignature || old && !fresh.dataset.renderSignature) {
+        const highlighted = old.classList.contains("track-highlight");
+        Array.from(old.attributes).forEach((attribute) => { if (!fresh.hasAttribute(attribute.name)) old.removeAttribute(attribute.name); });
+        Array.from(fresh.attributes).forEach((attribute) => { if (old.getAttribute(attribute.name) !== attribute.value) old.setAttribute(attribute.name, attribute.value); });
+        if (highlighted) old.classList.add("track-highlight");
+        reconcile(old, Array.from(fresh.childNodes));
+      }
+      if (parent.childNodes[index] !== node) parent.insertBefore(node, parent.childNodes[index] || null);
+    });
+    available.forEach((node) => { if (!retained.has(node)) node.remove(); });
+  }
+  function keepViewport(action) {
+    const focused = document.activeElement, x = window.scrollX, y = window.scrollY;
+    const cards = Array.from(document.querySelectorAll(".track-card"));
+    const focusedBox = focused?.getBoundingClientRect();
+    const anchor = focused !== document.body && focusedBox?.height && focusedBox.bottom > 0 && focusedBox.top < innerHeight ? focused : cards.find((node) => { const box = node.getBoundingClientRect(); return box.bottom > 0 && box.top < innerHeight; });
+    const top = anchor?.getBoundingClientRect().top;
+    action();
+    if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+    else if (focused && !focused.isConnected && focused !== document.body) $("#refresh-proposals").focus({ preventScroll: true });
+    window.scrollTo({ left: x, top: anchor?.isConnected ? y + anchor.getBoundingClientRect().top - top : y, behavior: "instant" });
+  }
+  function versionLabels(title) {
+    const text = normalText(title);
+    return [["Live", /(?:^| )(?:live|en concert|concert)(?: |$)/], ["Reprise", /(?:^| )(?:cover|reprise)(?: |$)/], ["Remix", /(?:^| )(?:remix|remixed)(?: |$)/], ["Instrumental", /(?:^| )(?:instrumental|instrumentale|karaoke)(?: |$)/]].filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+  }
+  function versionTags(title) {
+    const tags = el("div", "version-tags");
+    versionLabels(title).forEach((label) => { const tag = el("span", "mini-tag version-tag", label); tag.title = `${label} : repère indicatif provenant du titre, à vérifier à l’écoute.`; tag.setAttribute("aria-label", tag.title); tags.append(tag); });
+    return tags;
+  }
   function duration(seconds) { if (!Number.isFinite(Number(seconds)) || seconds == null || Number(seconds) <= 0) return "Durée à compléter"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; }
   function playlistDuration() {
     const sources = new Map(), playlists = new Set();
@@ -271,11 +348,12 @@
   }
   function filteredProposals() {
     const query = state.query.trim().toLocaleLowerCase("fr");
-    return state.items.filter((item) => (!state.mine || item.mine === true) && [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)))
+    return state.catalogueItems.filter((item) => (!state.mine || item.mine === true) && [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)))
       .sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
   }
   function locateProposal(item) {
     if ($("#manual-match-dialog").open) $("#manual-match-dialog").close();
+    applyCatalogueUpdates(false);
     state.mine = false; state.query = ""; $("#catalogue-query").value = "";
     const index = filteredProposals().findIndex((candidate) => candidate.id === item.id);
     if (index < 0) { toast("Cette proposition n’est plus dans la playlist. Actualisez pour vérifier."); return; }
@@ -292,8 +370,7 @@
     vote.addEventListener("click", () => voteFor(item, vote)); actions.append(locate, vote); return actions;
   }
   function showExisting(target, item, text) {
-    message(target, text || `${existingLabel(item)}. Inutile de l’ajouter deux fois : retrouvez-le ou votez pour lui.`);
-    target.append(el("p", "existing-title", `${item.title || "Morceau proposé"}${item.nickname ? ` · proposé par ${item.nickname}` : ""}`), existingActions(item));
+    reconcile(target, [el("p", "feedback info", text || `${existingLabel(item)}. Inutile de l’ajouter deux fois : retrouvez-le ou votez pour lui.`), el("p", "existing-title", `${item.title || "Morceau proposé"}${item.nickname ? ` · proposé par ${item.nickname}` : ""}`), existingActions(item)]);
   }
   function refreshEntryMatches() {
     const link = youtubeSource($("#link-input").value), existing = link?.key ? sourceMatches.get(link.key) : null;
@@ -308,18 +385,26 @@
     else message($("#manual-existing-feedback"), "");
   }
   function renderSearchResults() {
-    const results = $("#search-results"); results.replaceChildren();
+    const rows = [];
     state.searchItems.forEach((item) => {
       const row = el("article", "search-result"), image = el("img"); image.src = "./static/placeholder.svg"; image.alt = "";
       const description = el("div", "search-result-text"); description.append(el("h3", "", item.title), el("p", "muted", `${item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste non renseigné")} · ${duration(item.duration)}`));
       const source = el("a", "result-source", "Voir sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer";
       if (/^https:\/\/(www\.)?youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(item.url || "")) description.append(source);
       const actions = el("div", "search-result-actions"), preview = previewButton(item), existing = existingSource(item);
+      row.dataset.searchId = youtubeVideoId(item) || item.url;
+      row.dataset.renderSignature = JSON.stringify([item.title, item.artist, item.channel, item.duration, item.url, existing?.id, existing?.voted, existing?.status, state.session?.settings?.offline_mode, state.session?.settings?.votes_open, state.proposalPending]);
+      description.append(versionTags(item.title));
       if (preview) actions.append(preview);
       if (existing) { description.append(el("span", "mini-tag existing-tag", existingLabel(existing))); actions.append(existingActions(existing)); }
-      else { const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.disabled = state.proposalPending; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); actions.append(add); }
-      row.append(image, description, actions); results.append(row);
+      else { const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.dataset.addVideoId = youtubeVideoId(item) || ""; add.disabled = state.proposalPending; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); actions.append(add); }
+      row.append(image, description, actions); rows.push(row);
     });
+    reconcile($("#search-results"), rows);
+    $("#search-more-row").classList.toggle("hidden", !state.searchHasMore && !state.searchLoading && !$("#search-more-status").textContent);
+    $("#search-more").classList.toggle("hidden", !state.searchHasMore && !state.searchLoading);
+    $("#search-more").disabled = state.searchLoading || !!state.session?.settings?.offline_mode;
+    $("#search-more").textContent = state.searchLoading ? "Recherche en cours…" : "Plus de résultats";
   }
   function chooseManualVersion(matches) {
     const list = $("#manual-match-list"); list.replaceChildren();
@@ -364,39 +449,49 @@
     document.querySelectorAll("[data-preview-id]").forEach((button) => { button.disabled = !!settings.offline_mode; button.textContent = settings.offline_mode ? "Écoute indisponible hors ligne" : "Écouter"; button.title = settings.offline_mode ? "Un accès à Internet est nécessaire pour écouter une vidéo YouTube." : "Ouvrir le lecteur YouTube de ce morceau."; });
   }
   function setEntry(name) {
+    state.entry = name;
     window.clearTimeout(state.searchTimer); state.searchController?.abort(); state.searchSerial++;
     $("#search-form button").disabled = !!state.session?.settings?.offline_mode;
     document.querySelectorAll("[data-entry]").forEach((tab) => { const active = tab.dataset.entry === name; tab.classList.toggle("active", active); tab.setAttribute("aria-selected", String(active)); tab.tabIndex = active ? 0 : -1; });
     ["search", "link", "manual"].forEach((mode) => $(`#${mode}-form`).classList.toggle("hidden", name !== mode));
     message($("#entry-feedback"), "");
-    state.searchItems = []; $("#search-results").replaceChildren(); refreshEntryMatches();
+    state.searchItems = []; state.searchHasMore = false; state.searchLoading = false; state.searchNextOffset = null; $("#search-more-status").textContent = ""; $("#search-results").replaceChildren(); renderSearchResults(); refreshEntryMatches(); saveDrafts();
   }
   function youtubeFallback(query) {
     const actions = el("div", "button-row search-fallback");
     const link = el("a", "button subtle small", "Chercher sur YouTube →"); link.href = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`; link.target = "_blank"; link.rel = "noopener noreferrer";
-    const manual = el("button", "button subtle small", "Proposer ce titre sans lien"); manual.type = "button"; manual.addEventListener("click", () => { setEntry("manual"); $("#manual-title").value = query; $("#manual-title").focus(); });
+    const manual = el("button", "button subtle small", "Proposer ce titre sans lien"); manual.type = "button"; manual.addEventListener("click", () => { setEntry("manual"); $("#manual-title").value = query; refreshEntryMatches(); saveDrafts(); $("#manual-title").focus(); });
     actions.append(link, manual); $("#entry-feedback").append(actions);
   }
-  async function searchMusic(query, serial) {
+  async function searchMusic(query, serial, more = false) {
     const target = $("#entry-feedback"), results = $("#search-results"), submit = $("#search-form button");
+    if (more && (state.searchLoading || !state.searchHasMore || query !== state.searchQuery || query !== $("#search-input").value.trim())) return;
     if (query.length < 3) { message(target, "Écrivez au moins 3 caractères pour trouver des morceaux."); return; }
     if (cloud()?.searchSupported === false) { message(target, "La recherche intégrée n’est pas disponible. Ouvrez YouTube pour choisir votre morceau, puis collez son lien ici."); youtubeFallback(query); return; }
-    state.searchController?.abort(); state.searchController = new AbortController(); submit.disabled = true;
-    state.searchItems = []; results.replaceChildren(); message(target, "On cherche les morceaux disponibles…");
+    state.searchController?.abort(); state.searchController = new AbortController(); submit.disabled = true; state.searchLoading = true;
+    const offset = more ? state.searchNextOffset : 0;
+    if (!more) { state.searchItems = []; state.searchHasMore = false; state.searchNextOffset = null; $("#search-more-status").textContent = ""; results.replaceChildren(); message(target, "On cherche les morceaux disponibles…"); }
+    else $("#search-more-status").textContent = "On cherche d’autres versions…";
+    renderSearchResults();
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(query)}`, { signal: state.searchController.signal });
+      const data = await api(`/api/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=5`, { signal: state.searchController.signal });
       if (serial !== state.searchSerial) return;
-      message(target, data.items?.length ? "Choisissez votre version : original, live ou remix. Si elle est déjà proposée, retrouvez-la ou votez pour elle." : "Aucun résultat disponible. Vous pouvez proposer le titre manuellement.");
-      state.searchItems = data.items || []; renderSearchResults();
-      if (!data.items?.length) youtubeFallback(query);
+      const seen = new Set(state.searchItems.map((item) => youtubeVideoId(item) || item.url)), added = (data.items || []).filter((item) => { const key = youtubeVideoId(item) || item.url; if (seen.has(key)) return false; seen.add(key); return true; });
+      state.searchItems.push(...added); state.searchQuery = query;
+      state.searchHasMore = data.has_more === true && Number.isInteger(data.next_offset) && data.next_offset > offset;
+      state.searchNextOffset = state.searchHasMore ? data.next_offset : null;
+      if (!more) message(target, state.searchItems.length ? "Choisissez votre version : original, live ou remix. Si elle est déjà proposée, retrouvez-la ou votez pour elle." : "Aucun résultat disponible. Vous pouvez proposer le titre manuellement.");
+      $("#search-more-status").textContent = more ? `${added.length} résultat${added.length > 1 ? "s" : ""} supplémentaire${added.length > 1 ? "s" : ""}${state.searchHasMore ? "." : ". Fin des résultats disponibles."}` : "";
+      if (!state.searchItems.length) youtubeFallback(query);
     } catch (error) {
       if (serial !== state.searchSerial || error.name === "AbortError") return;
-      message(target, `${error.message} Vous pouvez toujours coller un lien YouTube ou proposer un titre.`, "error"); youtubeFallback(query);
-    } finally { if (serial === state.searchSerial) submit.disabled = !!state.session?.settings?.offline_mode; }
+      if (more) $("#search-more-status").textContent = `${error.message} Vos premiers résultats restent affichés ; vous pouvez réessayer.`;
+      else { message(target, `${error.message} Vous pouvez toujours coller un lien YouTube ou proposer un titre.`, "error"); youtubeFallback(query); }
+    } finally { if (serial === state.searchSerial) { state.searchLoading = false; submit.disabled = !!state.session?.settings?.offline_mode; renderSearchResults(); } }
   }
   function chooseProposalScope() { $("#proposal-scope-dialog").showModal(); return new Promise((resolve) => { state.proposalScopeResolve = resolve; }); }
   function ambiguousYoutubeLink(value) { return youtubeSource(value)?.kind === "choice"; }
-  async function submitProposal(body, button) {
+  async function submitProposal(body, button, draft = submittedDraft(button, body)) {
     if (state.proposalPending) return;
     if (body.kind === "youtube" && !body.mode && ambiguousYoutubeLink(body.url)) { const mode = await chooseProposalScope(); if (!mode) { message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); return; } body = { ...body, mode }; }
     state.proposalPending = true; button.disabled = true; refreshEntryMatches();
@@ -404,7 +499,7 @@
     try {
       // A fresh snapshot catches ideas added by another guest since the last refresh.
       // The server still decides duplicates atomically if an addition races this check.
-      try { await loadProposals(); } catch { /* Submission retains the normal server validation when a refresh fails. */ }
+      try { await loadProposals({ background: true }); } catch { /* Submission retains the normal server validation when a refresh fails. */ }
       const matches = body.kind === "manual" ? manualMatches.get(manualKey(body.title, body.artist)) || [] : [];
       const existing = body.kind === "manual" ? matches.find((item) => exactManualMatch(item, body.title, body.artist)) : existingSource(body);
       if (existing) { showExisting($("#entry-feedback"), existing); return; }
@@ -420,12 +515,11 @@
         const detail = Array.isArray(data.similar) && data.similar.length ? " Un titre proche existe déjà ; l’organisation vérifiera les versions." : "";
         message($("#entry-feedback"), (data.message || "Votre idée est dans la playlist. Merci !") + detail, "success");
         toast("Un bon son de plus dans la playlist !");
-        if (body.kind === "manual") $("#manual-form").reset();
-        if (body.kind === "youtube") $("#link-form").reset();
+        clearSubmittedDraft(draft);
       }
       await loadProposals();
     } catch (error) {
-      if (error.detail?.need_choice && !body.mode) { const mode = await chooseProposalScope(); if (mode) { state.proposalPending = false; await submitProposal({ ...body, mode }, button); } else message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); }
+      if (error.detail?.need_choice && !body.mode) { const mode = await chooseProposalScope(); if (mode) { state.proposalPending = false; await submitProposal({ ...body, mode }, button, draft); } else message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); }
       else message($("#entry-feedback"), error.message, "error");
     }
     finally { state.proposalPending = false; button.disabled = false; refreshEntryMatches(); renderSearchResults(); }
@@ -438,7 +532,7 @@
       const found = state.items.find((track) => track.id === item.id);
       if (found) { found.votes = result.votes; found.voted = result.voted; }
       item.votes = result.votes; item.voted = result.voted;
-      renderProposals(); refreshEntryMatches(); renderSearchResults();
+      rebuildMatches(); keepViewport(() => renderProposals({ preserveOrder: true }));
       toast(result.voted ? "Votre vote est enregistré ♡" : "Votre vote a été retiré.");
     } catch (error) { toast(error.message); }
     finally {
@@ -468,6 +562,7 @@
     try {
       await api(`/api/proposals/${item.id}/withdraw`, { method: "POST", body: {} });
       state.items = state.items.filter((track) => track.id !== item.id);
+      state.catalogueItems = state.catalogueItems.filter((track) => track.id !== item.id); rebuildMatches();
       renderProposals();
       $("#withdraw-dialog").close();
       toast("Votre proposition a été retirée de la playlist.");
@@ -483,10 +578,12 @@
       if (!$("#withdraw-dialog").open) state.withdrawing = null;
     }
   }
-  function renderProposals() {
+  function renderProposals({ preserveOrder = false } = {}) {
     const query = state.query.trim().toLocaleLowerCase("fr");
     const mine = state.items.filter((item) => item.mine === true);
     const items = filteredProposals();
+    if (preserveOrder) { const order = new Map(state.catalogueOrder.map((id, index) => [id, index])); items.sort((a, b) => (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity)); }
+    else state.catalogueOrder = items.map((item) => item.id);
     const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     state.page = Math.min(pages, Math.max(1, state.page));
     const first = (state.page - 1) * PAGE_SIZE;
@@ -502,10 +599,11 @@
     $("#count-all").textContent = state.items.length;
     $("#count-mine").textContent = mine.length;
     $("#filter-all").classList.toggle("active", !state.mine); $("#filter-mine").classList.toggle("active", state.mine);
-    const list = $("#proposal-list"); list.replaceChildren();
+    const cards = [];
     items.slice(first, first + PAGE_SIZE).forEach((item, localIndex) => {
       const index = first + localIndex;
       const card = el("article", "track-card"); card.dataset.proposalId = String(item.id); card.tabIndex = -1;
+      card.dataset.renderSignature = JSON.stringify([index, item.title, item.artist, item.channel, item.duration, item.source_kind, item.url, item.state, item.nickname, item.avatar_id, item.avatar_version, item.votes, item.voted, item.mine, state.session?.settings?.offline_mode, state.session?.settings?.votes_open]);
       const visual = el("div", `track-art track-art-${index % 4}`); const image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; image.loading = "lazy"; visual.append(image, el("span", "track-number", String(index + 1).padStart(2, "0")));
       const content = el("div", "track-content"); content.append(el("h3", "track-title", item.title || "Titre à retrouver"));
       content.append(el("p", "track-artist", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")));
@@ -514,6 +612,7 @@
       else if (!item.url) details.append(el("span", "mini-tag", "Une idée à retrouver"));
       else if (item.state === "approved") details.append(el("span", "mini-tag approved", "Validé"));
       content.append(details);
+      if (item.source_kind !== "playlist") content.append(versionTags(item.title));
       if (item.source_kind === "playlist" && /^https:\/\/www\.youtube\.com\/playlist\?list=[A-Za-z0-9_-]{2,200}$/.test(item.url || "")) { const source = el("a", "result-source", "Voir la playlist sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer"; const actions = el("div", "track-source-actions"); actions.append(source); content.append(actions); }
       const preview = previewButton(item);
       if (preview) {
@@ -528,21 +627,32 @@
         const ownActions = el("div", "track-own-actions");
         const withdraw = el("button", "withdraw-button", "Retirer ma proposition"); withdraw.type = "button"; withdraw.dataset.withdrawId = String(item.id); withdraw.setAttribute("aria-label", `Retirer ma proposition : ${item.title}`); withdraw.addEventListener("click", () => requestWithdrawal(item)); ownActions.append(withdraw); card.append(ownActions);
       }
-      list.append(card);
+      cards.push(card);
     });
+    reconcile($("#proposal-list"), cards);
     fetchAvatars(items.slice(first, first + PAGE_SIZE));
     $("#catalogue-empty").classList.toggle("hidden", items.length > 0);
     $("#catalogue-empty h3").textContent = state.items.length ? "Aucun morceau pour cette recherche." : "Le premier morceau, c’est peut-être le vôtre.";
     $("#catalogue-empty p").textContent = state.mine ? "Vos propositions apparaîtront ici après votre premier ajout." : query ? "Essayez un autre titre, un artiste ou un pseudo." : "Ajoutez une idée pour lancer la playlist.";
-    rebuildMatches(); refreshEntryMatches(); renderSearchResults();
+    refreshEntryMatches(); renderSearchResults();
+    $("#catalogue-updates-label").textContent = state.pendingNewCount ? `${state.pendingNewCount} nouvelle${state.pendingNewCount > 1 ? "s" : ""} proposition${state.pendingNewCount > 1 ? "s" : ""} disponible${state.pendingNewCount > 1 ? "s" : ""}.` : "";
+    $("#catalogue-updates").classList.toggle("hidden", !state.pendingNewCount);
   }
-  async function loadProposals() {
+  function applyCatalogueUpdates(render = true) {
+    state.catalogueItems = state.items.slice(); state.pendingNewCount = 0;
+    if (render) keepViewport(() => renderProposals());
+  }
+  async function loadProposals({ background = false } = {}) {
     const serial = ++state.catalogueSerial;
     const data = await api("/api/proposals?sort=popular");
     if (serial !== state.catalogueSerial) return;
-    state.items = data.items || [];
+    const previous = new Map(state.items.map((item) => [item.id, item])), displayed = new Set(state.catalogueItems.map((item) => item.id));
+    state.items = (data.items || []).map((item) => { const old = previous.get(item.id); if (!old) return item; Object.assign(old, item); return old; });
+    if (background) { state.catalogueItems = state.items.filter((item) => displayed.has(item.id)); state.pendingNewCount = state.items.length - state.catalogueItems.length; }
+    else applyCatalogueUpdates(false);
+    rebuildMatches();
     // Only the server’s boolean marker grants owner actions; nicknames are display names.
-    renderProposals();
+    keepViewport(() => renderProposals({ preserveOrder: background }));
   }
   document.querySelectorAll("[data-entry]").forEach((button) => {
     button.addEventListener("click", () => setEntry(button.dataset.entry));
@@ -588,13 +698,15 @@
     window.clearTimeout(state.linkCheckTimer); refreshEntryMatches();
     const value = $("#link-input").value.trim();
     if (value === state.lastCheckedLink || !youtubeSource(value)) return;
-    state.linkCheckTimer = window.setTimeout(async () => { state.lastCheckedLink = value; try { await loadProposals(); } catch { /* The existing snapshot and server duplicate protection remain available. */ } }, 550);
+    state.linkCheckTimer = window.setTimeout(async () => { state.lastCheckedLink = value; try { await loadProposals({ background: true }); } catch { /* The existing snapshot and server duplicate protection remain available. */ } }, 550);
   });
   ["#manual-title", "#manual-artist"].forEach((selector) => $(selector).addEventListener("input", refreshEntryMatches));
+  Object.values(DRAFT_FIELDS).flat().forEach((id) => $(`#${id}`).addEventListener("input", saveDrafts));
+  $("#search-more").addEventListener("click", () => searchMusic(state.searchQuery, state.searchSerial, true));
   $("#search-form").addEventListener("submit", (event) => { event.preventDefault(); window.clearTimeout(state.searchTimer); searchMusic($("#search-input").value.trim(), ++state.searchSerial); });
   $("#search-input").addEventListener("input", (event) => {
     window.clearTimeout(state.searchTimer); state.searchController?.abort(); const serial = ++state.searchSerial, query = event.target.value.trim();
-    state.searchItems = []; $("#search-results").replaceChildren();
+    state.searchItems = []; state.searchHasMore = false; state.searchLoading = false; state.searchNextOffset = null; $("#search-more-status").textContent = ""; $("#search-results").replaceChildren(); renderSearchResults();
     $("#search-form button").disabled = !!state.session?.settings?.offline_mode;
     if (query.length < 3) { $("#search-results").replaceChildren(); message($("#entry-feedback"), ""); return; }
     state.searchTimer = window.setTimeout(() => searchMusic(query, serial), 800);
@@ -605,12 +717,17 @@
   $("#catalogue-sort").addEventListener("change", (event) => { state.sort = event.target.value; state.page = 1; renderProposals(); });
   [["#proposal-prev", -1], ["#proposal-next", 1]].forEach(([selector, direction]) => $(selector).addEventListener("click", () => { state.page += direction; renderProposals(); $("#propositions").scrollIntoView({ block: "start" }); }));
   $("#refresh-proposals").addEventListener("click", async (event) => { event.currentTarget.disabled = true; try { state.session = await api("/api/session"); syncSession(); await loadProposals(); toast("La playlist est à jour."); } catch (error) { toast(error.message); } finally { $("#refresh-proposals").disabled = false; } });
+  $("#apply-catalogue-updates").addEventListener("click", () => {
+    state.mine = false; state.query = ""; state.sort = "recent"; state.page = 1; $("#catalogue-query").value = ""; $("#catalogue-sort").value = "recent";
+    applyCatalogueUpdates(); const first = $("#proposal-list .track-card"); if (first) { first.focus({ preventScroll: true }); first.scrollIntoView({ block: "nearest" }); }
+  });
   $("#share-button").addEventListener("click", () => { $("#share-url").value = state.session?.settings?.public_url || window.location.href.split("#")[0]; $("#share-qr").classList.toggle("hidden", !!cloud() || !state.session?.settings?.public_url); if (!cloud() && state.session?.settings?.public_url) $("#share-qr").src = "/api/qr?scope=public"; $("#share-dialog").showModal(); });
   $("#copy-share").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#share-url").value); message($("#share-feedback"), "Lien copié. À vous de le partager !", "success"); } catch { $("#share-url").select(); message($("#share-feedback"), "Sélectionnez et copiez le lien affiché avec votre navigateur."); } });
   async function boot() {
     try { state.session = await api("/api/session"); syncSession(); await loadProposals(); }
     catch (error) { $("#global-notice").textContent = error.message; $("#global-notice").classList.remove("hidden"); $("#catalogue-empty").classList.remove("hidden"); $("#catalogue-empty h3").textContent = "La playlist n’a pas pu être chargée."; $("#catalogue-empty p").textContent = "Utilisez Actualiser lorsque la connexion revient."; }
   }
+  restoreDrafts();
   boot();
-  window.setInterval(() => { if (!document.hidden && state.session) loadProposals().catch(() => {}); }, 30000);
+  window.setInterval(() => { if (!document.hidden && state.session) loadProposals({ background: true }).catch(() => {}); }, 30000);
 })();

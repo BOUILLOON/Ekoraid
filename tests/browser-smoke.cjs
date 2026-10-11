@@ -47,6 +47,7 @@ def analyze(url,cfg,mode=None):
  return dict(kind=parsed['kind'],title='Playlist de test' if parsed['kind']=='playlist' else 'Lien YouTube de test',source_url=parsed['url'],complete=True,warnings=[],entries=entries)
 providers.analyze=analyze
 providers.search=lambda query,cfg: [entry('abcdefghijk')]
+providers.search_page=lambda query,cfg,offset=0,limit=5: dict(items=[entry('abcdefghijk')] if offset==0 else [],has_more=False,next_offset=None)
 providers.analyze_links=lambda text,cfg: dict(kind='links',title='Liens de test',source_url='',complete=True,warnings=[],entries=[dict(entry(providers.parse_youtube_url(line,'video')['video_id']),position=i) for i,line in enumerate(text.splitlines(),1) if line.strip()])
 transfers.transfer_addresses=lambda cfg: [dict(host='192.168.50.10',label='Wi-Fi simulé — 192.168.50.10')]
 surface=sys.argv[1]
