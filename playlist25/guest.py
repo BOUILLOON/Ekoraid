@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import db, providers
+from .guest_playlists import classify_source, prepare_youtube_proposal
 from .security import csrf_token, install_session, rate_limit, require_csrf
 
 
@@ -37,10 +38,13 @@ class IdentityInput(_Input):
 
 
 class ProposalInput(_Input):
-    kind: Literal["manual", "youtube"]
+    kind: Literal["manual", "youtube", "playlist"]
+    mode: Literal["video", "playlist"] | None = None
     title: str = Field(default="", max_length=240)
     artist: str = Field(default="", max_length=160)
     url: str = Field(default="", max_length=2048)
+    duration: float | None = Field(default=None, gt=0, lt=100000000, strict=True, allow_inf_nan=False)
+    channel: str = Field(default="", max_length=160)
 
 
 class VoteInput(_Input):
@@ -55,7 +59,7 @@ _VISIBLE_STATES = {"pending", "approved"}
 _PUBLIC_FIELDS = (
     "id", "source_id", "nickname", "state", "sort_order", "title", "artist",
     "channel", "duration", "thumbnail", "url", "video_id", "status", "votes",
-    "voted", "created_at", "mine", "avatar_id", "avatar_version",
+    "voted", "created_at", "mine", "avatar_id", "avatar_version", "source_kind",
 )
 _EXTERNAL_SLOTS = threading.BoundedSemaphore(4)
 
@@ -211,6 +215,7 @@ def _public(item: dict) -> dict:
     public["voted"] = bool(public.get("voted"))
     public["mine"] = bool(public.get("mine"))
     public["thumbnail"] = _thumbnail(public.get("thumbnail"))
+    public["source_kind"] = classify_source(item)
     return public
 
 
@@ -229,7 +234,7 @@ def _same_source(items: list[dict], source_id: int | None) -> dict | None:
 def _manual_duplicate(conn, items: list[dict], title: str, artist: str) -> dict | None:
     title_key, artist_key = _normal(title), _normal(artist)
     for item in items:
-        if not item.get("video_id") and (
+        if not item.get("video_id") and not item.get("url") and (
             _normal(item.get("title") or "") == title_key
             and _normal(item.get("artist") or "") == artist_key
         ):
@@ -241,7 +246,7 @@ def _withdrawn_manual_source(conn, guest_id: str, title: str, artist: str):
     """Reuse an owner's exact text source without erasing the archived proposal."""
     rows = conn.execute(
         "SELECT s.id,s.title,s.artist FROM sources s JOIN proposals p ON p.source_id=s.id "
-        "WHERE p.guest_id=? AND p.withdrawn_at IS NOT NULL AND s.video_id IS NULL "
+        "WHERE p.guest_id=? AND p.withdrawn_at IS NOT NULL AND s.video_id IS NULL AND (s.url IS NULL OR s.url='') "
         "ORDER BY p.id DESC", (guest_id,),
     )
     title_key, artist_key = _normal(title), _normal(artist)
@@ -274,7 +279,8 @@ def _source_error(error: ValueError) -> HTTPException:
     status = int(getattr(error, "status", 400))
     if status not in {400, 404, 409, 413, 429, 502, 503, 504}:
         status = 400
-    return HTTPException(status, str(error))
+    detail = {"message": str(error), "need_choice": True} if getattr(error, "need_choice", False) else str(error)
+    return HTTPException(status, detail)
 
 
 def create_guest_app(cfg) -> FastAPI:
@@ -451,26 +457,34 @@ def create_guest_app(cfg) -> FastAPI:
                 if not url:
                     raise HTTPException(400, "Colle le lien d’un morceau YouTube.")
                 try:
-                    parsed = providers.parse_youtube_url(url, mode="video")
+                    entry = prepare_youtube_proposal(url, title, artist, payload.mode, payload.kind)
                 except ValueError as error:
                     raise _source_error(error) from error
-                known = conn.execute("SELECT id FROM sources WHERE video_id=?",
-                                     (parsed["video_id"],)).fetchone()
+                if entry["source_kind"] == "playlist":
+                    if payload.duration is not None or payload.channel:
+                        raise HTTPException(400, "La durée de cette playlist sera connue après l’analyse de ses morceaux.")
+                    known = conn.execute("SELECT id FROM sources WHERE video_id IS NULL AND url=?", (entry["url"],)).fetchone()
+                else:
+                    known = conn.execute("SELECT id FROM sources WHERE video_id=?", (entry["video_id"],)).fetchone()
+                    if payload.duration is not None:
+                        if payload.duration > cfg.max_duration:
+                            raise HTTPException(400, "Ce morceau dépasse la durée maximale autorisée.")
+                        entry["duration"] = payload.duration
+                    entry["channel"] = _text(payload.channel, "La chaîne")
                 duplicate = _same_source(items, known["id"] if known else None)
-                entry = {"video_id": parsed["video_id"], "url": parsed["url"],
-                         "title": title or f"Vidéo YouTube ({parsed['video_id']})",
-                         "artist": artist, "status": "pending"}
-                if not duplicate and not known:
+                if entry["source_kind"] == "playlist":
+                    warning = "La playlist est proposée. L’administrateur pourra choisir ses morceaux avant de préparer les fichiers."
+                elif not duplicate and not known:
                     if settings["offline_mode"]:
                         warning = "Le lien a été enregistré. Ses informations seront vérifiées "                                   "par l’administrateur lorsque Internet sera disponible."
                     elif _EXTERNAL_SLOTS.acquire(blocking=False):
                         try:
-                            analysis = providers.analyze(parsed["url"], cfg, mode="video")
+                            analysis = providers.analyze(entry["url"], cfg, mode="video")
                             entries = analysis.get("entries") or []
                             if not entries:
                                 warning = "Le lien est enregistré, mais aucune information n’a pu "                                           "être obtenue. L’administrateur pourra le vérifier."
                             else:
-                                entry = _entry(entries[0], cfg, expected_id=parsed["video_id"])
+                                entry = _entry(entries[0], cfg, expected_id=entry["video_id"])
                                 if not entries[0].get("available", True):
                                     warning = "Le lien a été enregistré, mais YouTube signale ce morceau "                                               "comme indisponible. L’administrateur devra le vérifier."
                         except ValueError as error:
@@ -481,9 +495,6 @@ def create_guest_app(cfg) -> FastAPI:
                             _EXTERNAL_SLOTS.release()
                     else:
                         warning = "Le lien est enregistré. La recherche est occupée ; "                                   "l’administrateur pourra vérifier ses informations."
-            if duplicate:
-                return {"duplicate": _public(duplicate), "similar": [],
-                        "message": "Ce morceau est déjà proposé. Tu peux voter pour lui."}
 
         # External metadata lookup never holds a write lock. Recheck settings, quota and
         # duplicates inside one transaction to prevent concurrent duplicate submissions.
@@ -498,6 +509,15 @@ def create_guest_app(cfg) -> FastAPI:
             if entry.get("video_id"):
                 known = conn.execute("SELECT id FROM sources WHERE video_id=?",
                                      (entry["video_id"],)).fetchone()
+                duplicate = _same_source(items, known["id"] if known else None)
+                if known and entry.get("duration") is not None:
+                    conn.execute("UPDATE sources SET duration=COALESCE(duration,?),channel=CASE WHEN channel='' THEN ? ELSE channel END WHERE id=?",
+                                 (entry["duration"], entry.get("channel", ""), known["id"]))
+                    if duplicate:
+                        updated = conn.execute("SELECT duration,channel FROM sources WHERE id=?", (known["id"],)).fetchone()
+                        duplicate.update(dict(updated))
+            elif classify_source(entry) == "playlist":
+                known = conn.execute("SELECT id FROM sources WHERE video_id IS NULL AND url=?", (entry["url"],)).fetchone()
                 duplicate = _same_source(items, known["id"] if known else None)
             else:
                 duplicate = _manual_duplicate(conn, items, entry["title"], entry.get("artist", ""))

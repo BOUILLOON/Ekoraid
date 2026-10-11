@@ -503,12 +503,18 @@ def create_admin_app(cfg: Settings) -> FastAPI:
         with _connection(cfg) as conn:
             states = {row["state"]: row["n"] for row in conn.execute("SELECT state,COUNT(*) n FROM proposals GROUP BY state")}
             jobs = {row["status"]: row["n"] for row in conn.execute("SELECT status,COUNT(*) n FROM jobs GROUP BY status")}
-            duration = conn.execute("SELECT SUM(duration) FROM sources WHERE id IN (SELECT source_id FROM proposals WHERE state='approved')").fetchone()[0]
+            duration = conn.execute("""SELECT
+                COALESCE(SUM(CASE WHEN duration>0 THEN duration ELSE 0 END),0) AS seconds,
+                COALESCE(SUM(CASE WHEN duration>0 THEN 1 ELSE 0 END),0) AS known_count,
+                COALESCE(SUM(CASE WHEN duration IS NULL OR duration<=0 THEN 1 ELSE 0 END),0) AS unknown_count
+                FROM sources WHERE id IN (SELECT source_id FROM proposals WHERE state='approved' AND withdrawn_at IS NULL)""").fetchone()
             return {"proposals": sum(states.values()), "pending": states.get("pending", 0),
                     "approved": states.get("approved", 0), "rejected": states.get("rejected", 0),
                     "archived": states.get("archived", 0), "available": len(library.available_sources(conn, cfg)),
                     "votes": conn.execute("SELECT COUNT(*) FROM votes").fetchone()[0],
-                    "total_duration": duration or 0,
+                    "total_duration": duration["seconds"],
+                    "total_duration_known_count": duration["known_count"],
+                    "total_duration_unknown_count": duration["unknown_count"],
                     "jobs": {"queued": jobs.get("queued", 0),
                              "active": sum(jobs.get(key, 0) for key in ("downloading", "converting", "verifying")),
                              "failed": sum(jobs.get(key, 0) for key in ("failed", "error", "unavailable", "interrupted")),
@@ -781,13 +787,16 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             _existing_sources(conn, ids)
             effective = _effective_cfg(conn, cfg)
             sources = [dict(conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()) for source_id in ids]
-        prepared = {}
+        prepared, failed_urls = {}, {}
         direct_ids, warnings, skipped = [], [], []
         for source in sources:
             if classify_source(source) != "playlist":
                 direct_ids.append(source["id"])
                 continue
             url = source["url"]
+            if url in failed_urls:
+                skipped.append({"source_id": source["id"], "reason": failed_urls[url]})
+                continue
             if url in prepared:
                 prepared[url]["origins"].append(source["id"])
                 continue
@@ -795,6 +804,7 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                 analysis = _validated_playlist_analysis(providers.analyze(url, effective, mode="playlist"), effective, url)
             except (ValueError, TypeError) as exc:
                 reason = f"Playlist « {source['title']} » non analysée : {exc}"
+                failed_urls[url] = reason
                 warnings.append(reason)
                 skipped.append({"source_id": source["id"], "reason": reason})
                 continue

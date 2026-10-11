@@ -149,7 +149,9 @@ def bundle_zip(directory: Path, destination: Path) -> str:
     partial = destination.with_suffix(".zip.part")
     try:
         with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as output:
-            for path in sorted(directory.rglob("*")):
+            # WindowsPath ordering folds case; archive order must use the same
+            # exact portable names on Windows and during packaging checks.
+            for path in sorted(directory.rglob("*"), key=lambda item: item.relative_to(directory).as_posix()):
                 if path.is_file():
                     output.write(path, (Path("Studio-Fanny") / path.relative_to(directory)).as_posix())
         os.replace(partial, destination)
@@ -230,7 +232,25 @@ def main():
     # Local diagnosis only: the publication workflow always executes the smoke test.
     parser.add_argument("--skip-smoke", action="store_true")
     args = parser.parse_args()
-    print(build(args.work.resolve(), args.destination.resolve(), run_smoke=not args.skip_smoke))
+    try:
+        print(build(args.work.resolve(), args.destination.resolve(), run_smoke=not args.skip_smoke))
+    except Exception as error:
+        # Keep the actionable failure readable via the GitHub annotations API
+        # even when a client cannot retrieve Actions' redirected full logs.
+        details = str(error)
+        report = args.work / "windows-smoke.json"
+        if report.is_file():
+            try:
+                smoke_error = json.loads(report.read_text(encoding="utf-8")).get("error")
+                if smoke_error:
+                    details = "Frozen Windows smoke: " + str(smoke_error)
+            except (OSError, ValueError):
+                pass
+        escaped = details[:12000].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        print(f"::error title=Windows desktop build::{escaped}", flush=True)
+        raise
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ function searchRequest(query = "Dalida", guest = "a".repeat(64)) {
   return new Request("https://testing-project.supabase.co/functions/v1/music-search", {
     method: "POST", body: JSON.stringify({query, guest_token: guest}) });
 }
+function videoRequest(video_id = "abcDEF_1234") {
+  return new Request("https://testing-project.supabase.co/functions/v1/music-search", {
+    method: "POST", body: JSON.stringify({action: "video", video_id, guest_token: "a".repeat(64)}) });
+}
 const fixtureHTML = '<script>var ytInitialData = {"contents":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"videoRenderer":{"videoId":"abcDEF_1234","title":{"runs":[{"text":"Fixture de résultat réellement reçue"}]},"ownerText":{"runs":[{"text":"Une chaîne"}]},"lengthText":{"simpleText":"3:42"}}}]}}]}}};</script>';
 
 Deno.test("Edge bounded routes, server budgets, actual metadata, optional free API and honest failure", async (test) => {
@@ -43,6 +47,32 @@ Deno.test("Edge bounded routes, server budgets, actual metadata, optional free A
       globalThis.fetch = async () => { requests++; return new Response(JSON.stringify({error: "Limite", status: 429})); };
       const response = await handler(searchRequest());
       check(response.status === 429 && requests === 1, "Provider called after quota denial");
+    });
+    await test.step("canonical watch metadata with server budget and exact duration", async () => {
+      const destinations: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input); destinations.push(url);
+        if (url.includes("playlist25_search_budget")) {
+          check(JSON.parse(String(init?.body)).p_official === false, "Public watch lookup must not consume optional API quota");
+          return new Response(JSON.stringify({allowed: true}));
+        }
+        return new Response('<script>var ytInitialPlayerResponse = {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"abcDEF_1234","title":"Métadonnée réellement retournée","author":"Chaîne","lengthSeconds":"321"}};</script>');
+      };
+      const response = await handler(videoRequest());
+      const result = await response.json();
+      check(response.status === 200 && result.item.duration === 321 && result.item.video_id === "abcDEF_1234", "Actual video metadata absent");
+      check(destinations[1] === "https://www.youtube.com/watch?v=abcDEF_1234&hl=fr", "Noncanonical destination fetched");
+    });
+    await test.step("video metadata forbids URLs and quota failures before provider access", async () => {
+      let requests = 0;
+      globalThis.fetch = async () => { requests++; return new Response(JSON.stringify({allowed: false, error: "Budget", status: 429})); };
+      check((await handler(videoRequest("https://127.0.0.1/private"))).status === 422 && requests === 0, "Arbitrary URL reached network");
+      check((await handler(videoRequest())).status === 429 && requests === 1, "Video fetched after denied budget");
+      globalThis.fetch = async (input) => String(input).includes("playlist25_search_budget")
+        ? new Response(JSON.stringify({allowed: true})) : new Response("Forbidden", {status: 403});
+      const denied = await handler(videoRequest());
+      const result = await denied.json();
+      check(denied.status === 503 && !result.item, "Unavailable video invented metadata");
     });
     await test.step("invalid identity and oversized query do not reach network", async () => {
       let requests = 0;

@@ -41,7 +41,12 @@ jobs:
       - name: Installer les versions épinglées
         run: python -m pip install -r requirements.txt -r requirements-desktop-build.txt
       - name: Vérifier les tests de distribution
-        run: python -m pytest tests/test_desktop_packaging.py -q
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py -q --junitxml=build/windows/pytest.xml
+          $PlaylistTestExitCode = $LASTEXITCODE
+          python scripts/packaging/annotate_pytest.py build/windows/pytest.xml
+          exit $PlaylistTestExitCode
       - name: Construire, ouvrir la fenêtre et tester le ZIP audio autorisé
         run: python scripts/build_windows.py --work build/windows --destination dist/windows
       - name: Conserver le ZIP et ses preuves de vérification
@@ -61,7 +66,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Studio-Fanny-diagnostic-Windows
-          path: build/windows/windows-smoke.json
+          path: |
+            build/windows/windows-smoke.json
+            build/windows/pytest.xml
           if-no-files-found: ignore
           retention-days: 7
       - name: Publier la release après le test Windows réel

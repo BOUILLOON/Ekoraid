@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { initialData, parseYouTubeHTML, parseOfficialSearch, parseDuration } from "./supabase/functions/music-search/parser.mjs";
+import { initialData, parseYouTubeHTML, parseYouTubeVideoHTML, parseOfficialSearch, parseDuration } from "./supabase/functions/music-search/parser.mjs";
 
 // Fixtures synthétiques dans la structure réelle YouTube, jamais données runtime.
 const renderer = (id, title = "Titre de test") => ({videoRenderer: {
@@ -38,4 +38,18 @@ const official = parseOfficialSearch({items: [{id: {videoId: "abcDEF_1234"}, sni
 assert.equal(official.length, 1);
 assert.equal(official[0].duration, 240);
 assert.equal(official[0].artist, "");
-console.log("PASS: real-format YouTube parser, duplicates/live exclusions, absent metadata, strict thumbnails, duration/API parsing, honest blocked-search errors.");
+const player = {playabilityStatus: {status: "OK"}, videoDetails: {videoId: "abcDEF_1234", title: 'Métadonnée } " reçue',
+  author: "Chaîne YouTube", lengthSeconds: "222", thumbnail: {thumbnails: [{url: "https://i.ytimg.com/vi/abcDEF_1234/hqdefault.jpg"}]}}};
+const videoHTML = response => `<script>var ytInitialPlayerResponse = ${JSON.stringify(response)};</script>`;
+const video = parseYouTubeVideoHTML(videoHTML(player), "abcDEF_1234");
+assert.equal(video.video_id, "abcDEF_1234");
+assert.equal(video.duration, 222);
+assert.equal(video.title, 'Métadonnée } " reçue');
+assert.equal(video.channel, "Chaîne YouTube");
+assert.equal(video.artist, "");
+assert.throws(() => parseYouTubeVideoHTML(videoHTML(player), "foreign1234"));
+assert.throws(() => parseYouTubeVideoHTML(videoHTML({...player, playabilityStatus: {status: "LOGIN_REQUIRED"}}), "abcDEF_1234"));
+assert.throws(() => parseYouTubeVideoHTML("<html>Consent required</html>", "abcDEF_1234"));
+assert.throws(() => parseYouTubeVideoHTML(videoHTML({...player, videoDetails: {...player.videoDetails, isLive: true}}), "abcDEF_1234"));
+assert.equal(parseYouTubeVideoHTML(videoHTML({...player, videoDetails: {...player.videoDetails, lengthSeconds: "invalid"}}), "abcDEF_1234").duration, null);
+console.log("PASS: real-format search/player parsers, exact video identity, duplicates/live exclusions, absent metadata, strict thumbnails, duration/API parsing, honest blocked-provider errors.");

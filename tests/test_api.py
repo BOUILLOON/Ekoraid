@@ -1,10 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+import base64
+import hashlib
+import io
 from pathlib import Path
 import shutil
 import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, PngImagePlugin
 
 from playlist25 import db
 from playlist25.config import Settings
@@ -31,6 +35,16 @@ def manual(client,headers,title='Un titre',artist='Artiste'):
     response=client.post('/api/proposals',json={'kind':'manual','title':title,'artist':artist},headers=headers)
     assert response.status_code==200,response.text
     return response.json()
+
+
+def avatar_uri(*,size=(128,128),color='crimson',format='PNG',metadata=False):
+    image=Image.new('RGBA' if format=='PNG' else 'RGB',size,color)
+    options={}
+    if metadata:
+        info=PngImagePlugin.PngInfo(); info.add_text('Location','private original metadata')
+        options['pnginfo']=info
+    output=io.BytesIO(); image.save(output,format=format,**options)
+    return 'data:image/png;base64,'+base64.b64encode(output.getvalue()).decode('ascii')
 
 
 def test_public_identity_csrf_and_isolated_surface(cfg):
@@ -75,6 +89,149 @@ def test_proposals_quota_similar_and_manual_duplicate(cfg):
     assert response.status_code==429
     with db.connect(cfg) as conn:
         assert conn.execute('SELECT count(*) FROM proposals').fetchone()[0]==2
+
+
+def test_zero_quota_allows_many_proposals_and_concurrent_duplicates_without_removing_positive_limits(cfg):
+    alice,headers,identity=guest(cfg)
+    with db.connect(cfg) as conn:
+        db.set_setting(conn,'max_proposals',0)
+        db.set_setting(conn,'max_total_proposals',1)  # Retired historical setting must not cap collection.
+    assert alice.get('/api/session').json()['settings']['max_proposals']==0
+    for number in range(12):
+        manual(alice,headers,f'Proposition illimitée {number}')
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses=list(pool.map(lambda _:alice.post('/api/proposals',json={'kind':'manual','title':'Même ajout concurrent'},headers=headers),range(4)))
+    assert all(response.status_code==200 for response in responses)
+    proposal_ids={response.json().get('item',response.json().get('duplicate'))['id'] for response in responses}
+    assert len(proposal_ids)==1
+    mine=alice.get('/api/proposals?mine=true').json()['items']
+    assert len(mine)==13 and all(item['mine'] for item in mine)
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE guest_id=?',(identity['id'],)).fetchone()[0]==13
+        db.set_setting(conn,'max_proposals',2)
+    assert alice.post('/api/proposals',json={'kind':'manual','title':'Limite positive restaurée'},headers=headers).status_code==429
+
+
+def test_collection_and_public_list_continue_beyond_twenty_thousand_proposals(cfg):
+    alice,headers,identity=guest(cfg)
+    with db.connect(cfg) as conn:
+        db.set_setting(conn,'max_proposals',0)
+        db.set_setting(conn,'max_total_proposals',1)
+        conn.executemany("INSERT INTO sources(id,title,artist,status,created_at) VALUES(?,?,'','pending',?)",
+                         ((number,f'Catalogue historique {number}',db.now()) for number in range(1,20001)))
+        conn.executemany("INSERT INTO proposals(source_id,guest_id,state,created_at) VALUES(?,?,'pending',?)",
+                         ((number,identity['id'],db.now()) for number in range(1,20001)))
+    added=manual(alice,headers,'Encore une musique après vingt mille')['item']
+    assert added['mine'] is True
+    public=alice.get('/api/proposals').json()['items']
+    assert len(public)==20001
+    assert added['id'] in {item['id'] for item in public}
+    assert all(item['mine'] for item in public)
+    assert alice.post(f"/api/proposals/{added['id']}/vote",json={'active':True},headers=headers).json()['votes']==1
+
+
+def test_profile_photo_is_normalized_public_once_and_owner_session_isolated(cfg):
+    alice,headers,identity=guest(cfg,'Même pseudo')
+    bob,bob_headers,bob_identity=guest(cfg,'Même pseudo')
+    proposal=manual(alice,headers,'Photo de mon profil')['item']
+    assert proposal['avatar_id']==identity['id'] and proposal['avatar_version']==''
+    response=alice.post('/api/profile',json={'avatar':avatar_uri(size=(64,64),metadata=True)},headers=headers)
+    assert response.status_code==200,response.text
+    profile=response.json()['guest']
+    assert profile['id']==identity['id'] and profile['avatar_id']==identity['id']
+    assert len(profile['avatar_version'])==32 and 'avatar_data' not in profile
+    public=TestClient(create_guest_app(cfg))
+    photos=public.get('/api/avatars',params={'ids':','.join((identity['id'],bob_identity['id']))}).json()['items']
+    indexed={photo['id']:photo for photo in photos}
+    stored=indexed[identity['id']]
+    assert set(stored)=={'id','version','avatar_data'}
+    raw=base64.b64decode(stored['avatar_data'].split(',',1)[1])
+    with Image.open(io.BytesIO(raw)) as image:
+        assert image.format=='PNG' and image.size==(128,128) and image.mode=='RGBA'
+        assert 'Location' not in image.info and not image.getexif()
+    assert stored['version']==hashlib.md5(raw,usedforsecurity=False).hexdigest()
+    assert indexed[bob_identity['id']]['avatar_data']==''
+    listed=public.get('/api/proposals').json()['items'][0]
+    assert listed['avatar_id']==identity['id'] and listed['avatar_version']==stored['version']
+    assert 'avatar_data' not in listed and 'guest_id' not in listed
+    assert alice.get('/api/session').json()['guest']['avatar_version']==stored['version']
+    assert bob.post('/api/profile',json={'avatar':avatar_uri(color='blue'),'id':identity['id']},headers=bob_headers).status_code==422
+    assert bob.post('/api/profile',json={'avatar':avatar_uri(color='blue')},headers=bob_headers).status_code==200
+    assert public.get('/api/avatars',params={'ids':identity['id']}).json()['items']==[stored]
+
+
+def test_profile_remove_requires_identity_csrf_and_preserves_music_votes_history(cfg):
+    alice,headers,identity=guest(cfg)
+    bob,bob_headers,_=guest(cfg,'Bob')
+    proposal=manual(alice,headers)['item']
+    assert bob.post(f"/api/proposals/{proposal['id']}/vote",json={'active':True},headers=bob_headers).status_code==200
+    assert alice.post('/api/profile',json={'avatar':avatar_uri()},headers=headers).status_code==200
+    with db.connect(cfg) as conn:
+        before=tuple(dict(conn.execute(f'SELECT * FROM {table}').fetchone()) for table in ('proposals','sources','votes'))
+    assert alice.post('/api/profile',json={'avatar':''}).status_code==403
+    anonymous=TestClient(create_guest_app(cfg))
+    anonymous_headers={'X-CSRF-Token':anonymous.get('/api/session').json()['csrf_token']}
+    assert anonymous.post('/api/profile',json={'avatar':''},headers=anonymous_headers).status_code==401
+    removed=alice.post('/api/profile',json={'avatar':''},headers=headers)
+    assert removed.status_code==200 and removed.json()['guest']['avatar_version']==''
+    assert alice.get('/api/avatars',params={'ids':identity['id']}).json()['items']==[{'id':identity['id'],'version':'','avatar_data':''}]
+    with db.connect(cfg) as conn:
+        after=tuple(dict(conn.execute(f'SELECT * FROM {table}').fetchone()) for table in ('proposals','sources','votes'))
+        assert after==before
+
+
+@pytest.mark.parametrize('invalid_kind',['svg','jpeg','noncanonical','oversized','dimensions','truncated','animation'])
+def test_profile_invalid_images_never_replace_existing_photo(cfg,invalid_kind):
+    alice,headers,identity=guest(cfg)
+    assert alice.post('/api/profile',json={'avatar':avatar_uri()},headers=headers).status_code==200
+    before=alice.get('/api/avatars',params={'ids':identity['id']}).json()
+    if invalid_kind=='svg':
+        invalid='data:image/png;base64,'+base64.b64encode(b'<svg xmlns="http://www.w3.org/2000/svg"></svg>').decode('ascii')
+    elif invalid_kind=='jpeg': invalid=avatar_uri(format='JPEG')
+    elif invalid_kind=='noncanonical': invalid=avatar_uri()+'\n'
+    elif invalid_kind=='oversized': invalid='data:image/png;base64,'+'A'*200000
+    elif invalid_kind=='dimensions': invalid=avatar_uri(size=(129,128))
+    elif invalid_kind=='animation':
+        output=io.BytesIO()
+        Image.new('RGBA',(128,128),'red').save(output,format='PNG',save_all=True,append_images=[Image.new('RGBA',(128,128),'blue')],duration=100,loop=0)
+        invalid='data:image/png;base64,'+base64.b64encode(output.getvalue()).decode('ascii')
+    else: invalid='data:image/png;base64,'+base64.b64encode(b'\x89PNG\r\n\x1a\n').decode('ascii')
+    response=alice.post('/api/profile',json={'avatar':invalid},headers=headers)
+    assert response.status_code in (400,422),response.text
+    assert alice.get('/api/avatars',params={'ids':identity['id']}).json()==before
+
+
+def test_avatar_batch_is_bounded_and_reads_imported_cloud_profile_without_identity_change(cfg):
+    alice,headers,identity=guest(cfg)
+    imported='cloud:testing-project:22222222-2222-4222-8222-222222222222'
+    photo=avatar_uri()
+    raw=base64.b64decode(photo.split(',',1)[1]); version=hashlib.md5(raw,usedforsecurity=False).hexdigest()
+    with db.connect(cfg) as conn:
+        conn.execute('INSERT INTO guests(id,nickname,created_at,avatar_data,avatar_version) VALUES(?,?,?,?,?)',(imported,'Cloud',db.now(),photo,version))
+    assert alice.get('/api/avatars',params={'ids':imported}).json()['items']==[{'id':imported,'version':version,'avatar_data':photo}]
+    assert alice.get('/api/session').json()['guest']['id']==identity['id']
+    assert alice.get('/api/avatars',params={'ids':','.join([identity['id']]*60)}).status_code==200
+    assert alice.get('/api/avatars',params={'ids':','.join([identity['id']]*61)}).status_code==400
+    for invalid in ('not-a-uuid','../../private',identity['id']+',','cloud:bad/project:'+identity['id']):
+        assert alice.get('/api/avatars',params={'ids':invalid}).status_code==400
+
+
+def test_known_youtube_duration_fills_unknown_source_without_overwriting_title_or_verified_duration(cfg):
+    alice,headers,_=guest(cfg)
+    bob,bob_headers,_=guest(cfg,'Bob')
+    with db.connect(cfg) as conn: db.set_setting(conn,'offline_mode',True)
+    payload={'kind':'youtube','url':'https://youtu.be/BaW_jenozKc','title':'Titre choisi'}
+    first=alice.post('/api/proposals',json=payload,headers=headers).json()['item']
+    assert first['duration'] is None
+    known=bob.post('/api/proposals',json={**payload,'title':'Ne pas remplacer','duration':123.5,'channel':'Chaîne connue'},headers=bob_headers)
+    assert known.status_code==200,known.text
+    duplicate=known.json()['duplicate']
+    assert duplicate['id']==first['id'] and duplicate['duration']==123.5
+    assert duplicate['title']=='Titre choisi' and duplicate['channel']=='Chaîne connue'
+    repeated=alice.post('/api/proposals',json={**payload,'duration':456,'channel':'Ne pas remplacer'},headers=headers)
+    assert repeated.json()['duplicate']['duration']==123.5 and repeated.json()['duplicate']['channel']=='Chaîne connue'
+    for duration in (-1,0,'123',True,'NaN'):
+        assert alice.post('/api/proposals',json={**payload,'duration':duration},headers=headers).status_code==422
 
 
 def test_links_canonical_duplicates_and_real_search_provider_contract(cfg,monkeypatch):

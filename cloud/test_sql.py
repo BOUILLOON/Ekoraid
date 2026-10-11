@@ -5,14 +5,37 @@ Run: python cloud/test_sql.py. Requires Docker; no ports, external data or audio
 from __future__ import annotations
 
 import concurrent.futures
+import base64
+import hashlib
+import io
 import json
+import struct
 import subprocess
 import time
+import zlib
 from pathlib import Path
 from uuid import uuid4
+from PIL import Image, PngImagePlugin
 
 ROOT = Path(__file__).resolve().parent
 TOKEN_A, TOKEN_B, TOKEN_C = "a" * 64, "b" * 64, "c" * 64
+
+
+def png_avatar(color='crimson',size=(128,128),metadata=False):
+    output=io.BytesIO(); options={}
+    if metadata:
+        info=PngImagePlugin.PngInfo(); info.add_text('Location','private metadata')
+        options['pnginfo']=info
+    Image.new('RGBA',size,color).save(output,format='PNG',**options)
+    return png_uri(output.getvalue())
+
+
+def png_uri(raw):
+    return 'data:image/png;base64,'+base64.b64encode(raw).decode('ascii')
+
+
+def png_chunk(kind,data):
+    return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data)&0xffffffff)
 
 
 def literal(value):
@@ -20,7 +43,7 @@ def literal(value):
         return "NULL"
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
+    if isinstance(value, (int,float)):
         return str(value)
     if isinstance(value, (dict, list)):
         return "'" + json.dumps(value, ensure_ascii=False).replace("'", "''") + "'::jsonb"
@@ -44,6 +67,9 @@ def main():
         return result.stdout.strip()
     def rpc(function, *parameters, role="anon"):
         return json.loads(sql("select public." + function + "(" + ",".join(map(literal, parameters)) + ");", role=role))
+    def avatars(ids):
+        argument='NULL::uuid[]' if ids is None else 'ARRAY['+','.join(literal(value) for value in ids)+']::uuid[]'
+        return json.loads(sql('select public.playlist25_avatars('+argument+');',role='anon'))
     try:
         for _ in range(60):
             logs = subprocess.run(["docker", "logs", name], text=True, capture_output=True)
@@ -56,7 +82,14 @@ def main():
         sql("create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;")
         migration = (ROOT / "supabase.sql").read_text(encoding="utf-8")
         sql(migration)
+        assert sql("select max_proposals from public.playlist25_settings where singleton;") == "0", "New collections must have unlimited guest proposals"
+        # Reproduce the old positive-only constraint on a populated installation.
+        sql("update public.playlist25_settings set max_proposals=2 where singleton; "
+            "alter table public.playlist25_settings alter column max_proposals set default 10; "
+            "alter table public.playlist25_settings drop constraint playlist25_settings_max_proposals_check; "
+            "alter table public.playlist25_settings add constraint playlist25_settings_max_proposals_check check(max_proposals between 1 and 100);")
         sql(migration)  # reusable without destroying data/settings
+        assert sql("select max_proposals from public.playlist25_settings where singleton;") == "2", "Migration must preserve an existing positive limit"
         assert rpc("playlist25_session", TOKEN_A)["guest"] is None
         assert rpc("playlist25_propose", TOKEN_C, "manual", "Sans pseudo", "", None)["status"] == 401
         first = rpc("playlist25_identity", TOKEN_A, "Camille", None)
@@ -89,11 +122,46 @@ def main():
         assert len(anonymous_items) == 3 and all(row["mine"] is False for row in anonymous_items), "Anonymous ownership flags must be booleans, never null"
         mine = rpc("playlist25_list", TOKEN_A, "", "recent", True)["items"]
         assert len(mine) == 2 and all(row["mine"] for row in mine)
+        avatar_a,avatar_b=png_avatar(),png_avatar('blue')
+        assert rpc('playlist25_profile',TOKEN_C,avatar_a)['status']==401
+        photo=rpc('playlist25_profile',TOKEN_A,avatar_a)['guest']
+        digest=hashlib.md5(base64.b64decode(avatar_a.split(',',1)[1]),usedforsecurity=False).hexdigest()
+        assert photo['id']==first['id'] and photo['avatar_id']==first['id'] and photo['avatar_version']==digest
+        assert 'avatar_data' not in photo
+        assert rpc('playlist25_profile',TOKEN_A,avatar_a)['guest']['avatar_version']==digest
+        assert rpc('playlist25_session',TOKEN_A)['guest']['avatar_version']==digest
+        public_photo=avatars([first['id'],second['id']])['items']
+        assert set(public_photo[0])=={'id','version','avatar_data'}
+        assert next(row for row in public_photo if row['id']==first['id'])['avatar_data']==avatar_a
+        assert rpc('playlist25_profile',TOKEN_B,avatar_b)['guest']['id']==second['id']
+        assert avatars([first['id']])['items'][0]['avatar_data']==avatar_a,"Another token must never replace this owner's photo"
+        for row in rpc('playlist25_list',TOKEN_A,'','popular',False)['items']:
+            assert row['avatar_id'] in (first['id'],second['id']) and 'avatar_data' not in row
+        assert avatars([])=={'items':[]}
+        assert avatars([first['id']]*60)['items']
+        assert avatars([first['id']]*61)['status']==422 and avatars(None)['status']==422
+        raw=base64.b64decode(avatar_a.split(',',1)[1]); header=raw[:33]
+        invalid_avatars=[None,'data:image/svg+xml;base64,PHN2Zz4=','data:image/png;base64,AAAA',avatar_a+'\n',
+            'data:image/png;base64,'+'A'*200000,png_avatar(size=(129,128)),png_avatar(size=(64,64)),png_avatar(metadata=True),
+            png_uri(raw[:-1]),png_uri(raw+b'private trailing data'),png_uri(raw[:8]+b'\xff\xff\xff\xff'+raw[12:]),
+            png_uri(header+raw[8:33]+raw[33:]),png_uri(header+png_chunk(b'IDAT',b'')+png_chunk(b'IEND',b'')),
+            png_uri(header+png_chunk(b'IDAT',b'x')+png_chunk(b'IEND',b'x')),
+            png_uri(header+png_chunk(b'IDAT',b'')*257+raw[33:])]
+        for invalid_avatar in invalid_avatars:
+            assert sql('select public.playlist25_avatar_valid('+literal(invalid_avatar)+');')=='f'
+        for invalid_avatar in invalid_avatars[:5]:
+            assert rpc('playlist25_profile',TOKEN_A,invalid_avatar)['status']==422
+            assert avatars([first['id']])['items'][0]['version']==digest
+        before_photo_remove=sql('select (select count(*) from public.playlist25_proposals),(select count(*) from public.playlist25_votes);')
+        assert rpc('playlist25_profile',TOKEN_A,'')['guest']['avatar_version']==''
+        assert avatars([first['id']])['items']==[{'id':first['id'],'version':'','avatar_data':''}]
+        assert sql('select (select count(*) from public.playlist25_proposals),(select count(*) from public.playlist25_votes);')==before_photo_remove
         for role in ("anon", "authenticated"):
             sql("select token_hash from public.playlist25_guests;", role=role, success=False)
             sql("select public.playlist25_snapshot();", role=role, success=False)
             sql("select public.playlist25_admin_publish('{}'::jsonb,'[]'::jsonb);", role=role, success=False)
             sql("select public.playlist25_create_invitations(1);", role=role, success=False)
+            sql("select public.playlist25_avatar_valid('');",role=role,success=False)
             sql("insert into public.playlist25_votes values(1,gen_random_uuid(),now());", role=role, success=False)
         sql("grant select on public.playlist25_guests to anon;")
         assert sql("select count(*) from public.playlist25_guests;", role="anon") == "0", "RLS denies raw guest access even with SELECT"
@@ -101,6 +169,7 @@ def main():
         snapshot = rpc("playlist25_snapshot", role="service_role")
         assert "token_hash" not in json.dumps(snapshot) and "code_hash" not in json.dumps(snapshot)
         assert len(snapshot["votes"]) == 1
+        assert next(row for row in snapshot['guests'] if row['id']==second['id'])['avatar_data']==avatar_b
         sql("update public.playlist25_settings set invitation_required=true where singleton;")
         assert rpc("playlist25_identity", TOKEN_C, "Invité", "invalide")["status"] == 403
         code = rpc("playlist25_create_invitations", 1, role="service_role")["codes"][0]
@@ -163,7 +232,82 @@ def main():
         for _ in range(10):
             assert rpc("playlist25_identity", "9" * 64, "", None)["status"] == 422
         assert rpc("playlist25_identity", "9" * 64, "", None)["status"] == 429, "Failed actions must still consume their rate budget"
-        print("PASS: PostgreSQL reusable migration, persistent identities, duplicates/quotas, concurrent votes, RLS/private denials, invitations/search budgets, admin publication/merge, owner-only idempotent withdrawal, sticky archive/re-add and history preservation.")
+
+        unlimited = rpc("playlist25_admin_publish", {"max_proposals": 0}, [], role="service_role")
+        assert unlimited["settings"]["max_proposals"] == 0
+        for invalid_limit in (-1, 0.5, 101, "0", True, None):
+            assert rpc("playlist25_admin_publish", {"max_proposals": invalid_limit}, [], role="service_role")["status"] == 422
+            assert sql("select max_proposals from public.playlist25_settings where singleton;") == "0", "Invalid limit must not change the existing setting"
+        # Old settings remain readable but no longer reject accumulated objects.
+        sql("update public.playlist25_settings set max_total_proposals=1,max_total_votes=1,max_guests=1 where singleton;")
+        unlimited_token, volume_token = "6" * 64, "5" * 64
+        unlimited_guest = rpc("playlist25_identity", unlimited_token, "Sans limite", None)
+        assert unlimited_guest.get("id"), "Historical guest count must not prevent identity creation"
+        for number in range(12):
+            assert rpc("playlist25_propose", unlimited_token, "manual", f"Sans limite {number}", "", None).get("item")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            continued = list(pool.map(lambda number: rpc("playlist25_propose", unlimited_token, "manual", f"Ajout concurrent {number}", "", None), range(3)))
+        assert all(result.get("item") for result in continued)
+        assert sql(f"select count(*) from public.playlist25_proposals where guest_id={literal(unlimited_guest['id'])}::uuid;") == "15"
+        assert rpc("playlist25_propose", unlimited_token, "manual", "Trop rapide", "", None)["status"] == 429, "Short-term rate protection must remain active with unlimited history"
+        volume_guest = rpc("playlist25_identity", volume_token, "Grand catalogue", None)
+        assert volume_guest.get("id")
+        sql("insert into public.playlist25_sources(title,artist) select 'Volume historique '||number,'' from generate_series(1,20000) number; "
+            "insert into public.playlist25_proposals(source_id,guest_id) "
+            f"select id,{literal(volume_guest['id'])}::uuid from public.playlist25_sources where title like 'Volume historique %';")
+        after_volume = rpc("playlist25_propose", volume_token, "manual", "Après vingt mille musiques", "", None)
+        assert after_volume.get("item"), "Historical proposal count must not prevent another addition"
+        assert rpc("playlist25_vote", volume_token, after_volume["item"]["id"], True)["votes"] == 1, "Historical vote count must not prevent a new vote"
+        assert sql(f"select jsonb_array_length(public.playlist25_list({literal(volume_token)},'','recent',true)->'items');", role="anon") == "20001", "Public listing must not truncate the catalogue"
+        assert int(sql("select jsonb_array_length(public.playlist25_snapshot()->'proposals');", role="service_role")) > 20000, "Snapshot must include every proposal"
+        before_migration = sql("select (select count(*) from public.playlist25_guests),(select count(*) from public.playlist25_sources),(select count(*) from public.playlist25_proposals),(select count(*) from public.playlist25_votes);")
+        sql(migration)
+        sql(migration)
+        assert sql("select max_proposals from public.playlist25_settings where singleton;") == "0"
+        assert sql("select (select count(*) from public.playlist25_guests),(select count(*) from public.playlist25_sources),(select count(*) from public.playlist25_proposals),(select count(*) from public.playlist25_votes);") == before_migration
+        assert sql(f"select withdrawn_at from public.playlist25_proposals where id={pid};") == timestamp
+        assert avatars([second['id']])['items'][0]['avatar_data']==avatar_b,"Migration must preserve profile photos"
+
+        playlist_token='4'*64
+        assert rpc('playlist25_identity',playlist_token,'Playlists',None).get('id')
+        playlist=rpc('playlist25_propose',playlist_token,'playlist',None,'',None,'PL1234567890abc',None,'')['item']
+        assert playlist['source_kind']=='playlist' and playlist['video_id'] is None and playlist['duration'] is None
+        assert playlist['url']=='https://www.youtube.com/playlist?list=PL1234567890abc'
+        duplicate_playlist=rpc('playlist25_propose',TOKEN_C,'playlist','Autre nom','',None,'PL1234567890abc',None,'')
+        assert duplicate_playlist['duplicate']['id']==playlist['id']
+        manual_named_playlist=rpc('playlist25_propose',playlist_token,'manual','Playlist YouTube proposée','',None)['item']
+        assert manual_named_playlist['source_kind']=='manual' and manual_named_playlist['source_id']!=playlist['source_id']
+        second_playlist=rpc('playlist25_propose',playlist_token,'playlist',None,'',None,'PL9999999990abc',None,'')['item']
+        assert second_playlist['source_id']!=playlist['source_id']
+        assert rpc('playlist25_vote',TOKEN_C,playlist['id'],True)['votes']==1
+        assert rpc('playlist25_withdraw',playlist_token,playlist['id'])['withdrawn']
+        readded_playlist=rpc('playlist25_propose',playlist_token,'playlist',None,'',None,'PL1234567890abc',None,'')['item']
+        assert readded_playlist['id']!=playlist['id'] and readded_playlist['source_id']==playlist['source_id'] and readded_playlist['votes']==0
+        assert sql(f"select count(*) from public.playlist25_votes where proposal_id={playlist['id']};")=='1'
+        for invalid_list in ('RD1234567890abc','UU1234567890abc','../../private'):
+            assert rpc('playlist25_propose',playlist_token,'playlist',None,'',None,invalid_list,None,'')['status']==422
+        assert rpc('playlist25_propose',playlist_token,'playlist',None,'','dQw4w9WgXcQ','PL1234567890abc',None,'')['status']==422
+        assert rpc('playlist25_propose',playlist_token,'playlist',None,'',None,'PL1234567890abc',123,'')['status']==422
+        metadata_video=rpc('playlist25_propose',playlist_token,'youtube','Vrai titre connu','','abcDEF_1234',None,123.5,'Chaîne connue')['item']
+        assert metadata_video['source_kind']=='video' and metadata_video['duration']==123.5 and metadata_video['channel']=='Chaîne connue'
+        repeated_video=rpc('playlist25_propose',TOKEN_C,'youtube','Ne pas remplacer','','abcDEF_1234',None,456,'Autre chaîne')['duplicate']
+        assert repeated_video['duration']==123.5 and repeated_video['title']=='Vrai titre connu' and repeated_video['channel']=='Chaîne connue'
+        metadata_update={'id':metadata_video['id'],'state':'approved','title':metadata_video['title'],'artist':'','sort_order':0,'duration':180.25}
+        assert rpc('playlist25_admin_publish',{},[metadata_update],role='service_role')['updated']==1
+        for update in ({key:value for key,value in metadata_update.items() if key!='duration'},{**metadata_update,'duration':None}):
+            assert rpc('playlist25_admin_publish',{},[update],role='service_role')['updated']==1
+            assert sql(f"select duration from public.playlist25_sources where id={metadata_video['source_id']};")=='180.25'
+        for invalid_duration in (-1,0,100000000,'NaN',True):
+            assert rpc('playlist25_admin_publish',{},[{**metadata_update,'duration':invalid_duration}],role='service_role')['status']==422
+            assert sql(f"select duration from public.playlist25_sources where id={metadata_video['source_id']};")=='180.25'
+        for nonfinite in ('NaN','Infinity','-Infinity'):
+            checked=json.loads(sql(f"select public.playlist25_propose({literal(TOKEN_C)},'youtube',null,'','abcDEF_1234',null,{literal(nonfinite)}::double precision,'');",role='anon'))
+            assert checked['status']==422
+        sql(migration)
+        assert avatars([second['id']])['items'][0]['avatar_data']==avatar_b
+        assert sql(f"select duration from public.playlist25_sources where id={metadata_video['source_id']};")=='180.25'
+        assert sql(f"select state from public.playlist25_proposals where id={playlist['id']};")=='archived'
+        print("PASS: PostgreSQL reusable migration, owner photos/bounded PNG/public batches, canonical public playlists/re-add, finite durations/preservation, unlimited history beyond 20000, concurrency/rate protection, RLS, invitations, admin publication/merge and withdrawal history.")
     finally:
         subprocess.run(["docker", "stop", "-t", "1", name], capture_output=True)
 

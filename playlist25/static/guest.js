@@ -2,7 +2,7 @@
 
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false };
+  const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false, profileSerial: 0, profileAvatar: "", profileDirty: false, profileProcessing: false, profilePending: false, proposalScopeResolve: null };
   const PAGE_SIZE = 48;
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
@@ -33,9 +33,169 @@
     if (text) target.append(el("p", `feedback ${type}`, text));
   }
   function toast(text) { const node = el("div", "toast", text); $("#toasts").append(node); window.setTimeout(() => node.remove(), 4500); }
-  function duration(seconds) { if (!Number.isFinite(Number(seconds)) || seconds == null) return "Durée non renseignée"; const n = Math.floor(Number(seconds)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; }
+  function duration(seconds) { if (!Number.isFinite(Number(seconds)) || seconds == null || seconds === "") return "Durée à compléter"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; }
+  function playlistDuration() {
+    const sources = new Map(), playlists = new Set();
+    state.items.forEach((item) => { const key = String(item.source_id ?? `proposal-${item.id}`), known = item.duration !== null && item.duration !== undefined && item.duration !== "" && Number.isFinite(Number(item.duration)) && Number(item.duration) > 0; if (!sources.has(key) || known) sources.set(key, known ? Number(item.duration) : null); if (item.source_kind === "playlist") playlists.add(key); });
+    const values = Array.from(sources.values()), seconds = Math.floor(values.reduce((total, value) => total + (value || 0), 0)), hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60), unknown = values.filter((value) => value === null).length;
+    const unknownPlaylists = Array.from(playlists).filter((key) => sources.get(key) === null).length;
+    $("#stat-duration").textContent = values.length && values.length === unknown ? "À compléter" : hours ? `${hours.toLocaleString("fr")} h ${String(minutes).padStart(2, "0")} min` : `${minutes} min ${String(seconds % 60).padStart(2, "0")} s`;
+    $("#stat-duration-note").textContent = unknown ? `${unknown.toLocaleString("fr")} à compléter${unknownPlaylists ? `, dont ${unknownPlaylists} playlist${unknownPlaylists > 1 ? "s" : ""} à analyser` : ""}` : "Tous les morceaux ont une durée connue";
+  }
   function nicknameInitial(nickname) { return Array.from(nickname || "?")[0].toUpperCase(); }
+  const AVATAR_SIZE = 128, MAX_PHOTO_BYTES = 10 * 1024 * 1024, MAX_PHOTO_PIXELS = 20000000, AVATAR_CACHE_LIMIT = 200;
+  const avatarCache = new Map(), avatarPending = new Set();
+  const avatarKey = (id, version) => `${id}:${version}`;
+  const validAvatarId = (id) => typeof id === "string" && id.length <= 120 && /^(?:cloud:[a-z0-9-]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  const validAvatarVersion = (version) => typeof version === "string" && /^[0-9a-f]{32}$/i.test(version);
+  const validAvatarData = (value) => typeof value === "string" && value.length <= 200000 && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
+  function cachedAvatar(id, version) {
+    const key = avatarKey(id, version), cached = avatarCache.get(key);
+    if (cached !== undefined) { avatarCache.delete(key); avatarCache.set(key, cached); }
+    return cached;
+  }
+  function cacheAvatar(id, version, data) {
+    const key = avatarKey(id, version); avatarCache.delete(key); avatarCache.set(key, data);
+    while (avatarCache.size > AVATAR_CACHE_LIMIT) avatarCache.delete(avatarCache.keys().next().value);
+  }
+  function paintAvatar(node, nickname, data) {
+    node.replaceChildren();
+    if (validAvatarData(data)) { const image = el("img"); image.src = data; image.alt = ""; image.width = AVATAR_SIZE; image.height = AVATAR_SIZE; node.append(image); }
+    else node.textContent = nicknameInitial(nickname);
+  }
+  function setAvatar(node, person) {
+    node.dataset.avatarNickname = person?.nickname || "";
+    const id = person?.avatar_id, version = person?.avatar_version;
+    if (validAvatarId(id) && validAvatarVersion(version)) { node.dataset.avatarId = id; node.dataset.avatarVersion = version; paintAvatar(node, person?.nickname, cachedAvatar(id, version)); }
+    else { delete node.dataset.avatarId; delete node.dataset.avatarVersion; paintAvatar(node, person?.nickname, ""); }
+  }
+  function paintLoadedAvatars(id, version, data) {
+    document.querySelectorAll("[data-avatar-id][data-avatar-version]").forEach((node) => { if (node.dataset.avatarId === id && node.dataset.avatarVersion === version) paintAvatar(node, node.dataset.avatarNickname, data); });
+    if (state.session?.guest?.avatar_id === id && state.session.guest.avatar_version === version && $("#profile-dialog").open && !state.profileDirty && !state.profileProcessing) { state.profileAvatar = data; renderProfilePreview(); }
+  }
+  async function fetchAvatars(people) {
+    const wanted = new Map();
+    people.forEach((person) => {
+      const id = person?.avatar_id, version = person?.avatar_version;
+      if (!validAvatarId(id) || !validAvatarVersion(version)) return;
+      const key = avatarKey(id, version), cached = cachedAvatar(id, version);
+      if (cached !== undefined) { paintLoadedAvatars(id, version, cached); return; }
+      if (!avatarPending.has(key)) wanted.set(id, version);
+    });
+    const ids = Array.from(wanted.keys());
+    for (let first = 0; first < ids.length; first += PAGE_SIZE) {
+      const batch = ids.slice(first, first + PAGE_SIZE); batch.forEach((id) => avatarPending.add(avatarKey(id, wanted.get(id))));
+      try {
+        const response = await api(`/api/avatars?ids=${encodeURIComponent(batch.join(","))}`);
+        const returned = new Map((response.items || []).map((item) => [item.id, item]));
+        batch.forEach((id) => {
+          const version = wanted.get(id), item = returned.get(id), data = item?.version === version && validAvatarData(item.avatar_data) ? item.avatar_data : "";
+          cacheAvatar(id, version, data); paintLoadedAvatars(id, version, data);
+        });
+      } catch { /* Initials remain usable if a photo cannot be loaded. */ }
+      finally { batch.forEach((id) => avatarPending.delete(avatarKey(id, wanted.get(id)))); }
+    }
+  }
+  function profileButtons() {
+    const busy = state.profileProcessing || state.profilePending;
+    $("#profile-photo-input").disabled = $("#profile-remove-photo").disabled = busy;
+    $("#profile-remove-photo").disabled = busy || !(state.profileAvatar || state.session?.guest?.avatar_version);
+    $("#profile-save").disabled = busy || !state.profileDirty;
+    $("#profile-cancel").disabled = $("#profile-dialog .modal-close").disabled = !!state.profilePending;
+    $("#profile-save").textContent = state.profilePending ? "Enregistrement…" : "Enregistrer ma photo";
+  }
+  function renderProfilePreview() {
+    paintAvatar($("#profile-preview"), state.session?.guest?.nickname, state.profileAvatar);
+    $("#profile-photo-status").textContent = state.profileAvatar ? "Aperçu de votre photo, recadrée en carré." : "Votre initiale s’affichera à la place de la photo.";
+    profileButtons();
+  }
+  async function showProfile() {
+    if (!state.session?.guest) { showIdentity(); return; }
+    const guest = state.session.guest, serial = ++state.profileSerial;
+    state.profileDirty = state.profileProcessing = state.profilePending = false;
+    state.profileAvatar = cachedAvatar(guest.avatar_id, guest.avatar_version) || "";
+    $("#profile-nickname").textContent = guest.nickname; $("#profile-photo-input").value = ""; message($("#profile-feedback"), ""); renderProfilePreview(); $("#profile-dialog").showModal();
+    await fetchAvatars([guest]);
+    if (serial === state.profileSerial && $("#profile-dialog").open && !state.profileDirty) { state.profileAvatar = cachedAvatar(guest.avatar_id, guest.avatar_version) || ""; renderProfilePreview(); }
+  }
+  function imageDimensions(buffer) {
+    const bytes = new Uint8Array(buffer), view = new DataView(buffer), text = (start, length) => String.fromCharCode(...bytes.subarray(start, start + length));
+    if (bytes.length >= 24 && bytes[0] === 137 && text(1, 3) === "PNG" && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10 && text(12, 4) === "IHDR") return { width: view.getUint32(16), height: view.getUint32(20), type: "image/png" };
+    if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216) {
+      let offset = 2;
+      while (offset + 4 <= bytes.length) {
+        if (bytes[offset++] !== 255) break;
+        while (bytes[offset] === 255) offset++;
+        const marker = bytes[offset++];
+        if (marker === 217 || marker === 218) break;
+        if (marker === 1 || (marker >= 208 && marker <= 215)) continue;
+        if (offset + 2 > bytes.length) break;
+        const length = view.getUint16(offset);
+        if (length < 2 || offset + length > bytes.length) break;
+        if ([192, 193, 194, 195, 197, 198, 199, 201, 202, 203, 205, 206, 207].includes(marker) && length >= 8) return { width: view.getUint16(offset + 5), height: view.getUint16(offset + 3), type: "image/jpeg" };
+        offset += length;
+      }
+    }
+    if (bytes.length >= 30 && text(0, 4) === "RIFF" && text(8, 4) === "WEBP") {
+      let offset = 12;
+      while (offset + 8 <= bytes.length) {
+        const chunk = text(offset, 4), length = view.getUint32(offset + 4, true), start = offset + 8;
+        if (start + length > bytes.length) break;
+        if (chunk === "VP8X" && length >= 10) {
+          if (bytes[start] & 2) throw new Error("Choisissez une photo fixe, plutôt qu’une image animée.");
+          return { width: 1 + bytes[start + 4] + (bytes[start + 5] << 8) + (bytes[start + 6] << 16), height: 1 + bytes[start + 7] + (bytes[start + 8] << 8) + (bytes[start + 9] << 16), type: "image/webp" };
+        }
+        if (chunk === "VP8L" && length >= 5 && bytes[start] === 47) { const bits = view.getUint32(start + 1, true); return { width: (bits & 16383) + 1, height: ((bits >>> 14) & 16383) + 1, type: "image/webp" }; }
+        if (chunk === "VP8 " && length >= 10 && bytes[start + 3] === 157 && bytes[start + 4] === 1 && bytes[start + 5] === 42) return { width: view.getUint16(start + 6, true) & 16383, height: view.getUint16(start + 8, true) & 16383, type: "image/webp" };
+        offset = start + length + (length % 2);
+      }
+    }
+    throw new Error("Cette image n’est pas reconnue. Choisissez une photo PNG, JPEG ou WebP.");
+  }
+  async function prepareProfilePhoto(file) {
+    if (file.size > MAX_PHOTO_BYTES) throw new Error("Cette photo dépasse 10 Mo. Choisissez une image plus légère.");
+    if (!file.size) throw new Error("Ce fichier est vide. Choisissez une autre photo.");
+    const buffer = await file.arrayBuffer(), dimensions = imageDimensions(buffer);
+    if (!dimensions.width || !dimensions.height || dimensions.width > 10000 || dimensions.height > 10000 || dimensions.width * dimensions.height > MAX_PHOTO_PIXELS) throw new Error("Cette photo est trop grande. Choisissez une image de moins de 20 millions de pixels, avec des côtés de 10 000 pixels maximum.");
+    const blob = new Blob([buffer], { type: dimensions.type }); let image, objectUrl;
+    try {
+      if (window.createImageBitmap) image = await createImageBitmap(blob, { imageOrientation: "from-image" });
+      else { objectUrl = URL.createObjectURL(blob); image = new Image(); image.src = objectUrl; await image.decode(); }
+      const width = image.width || image.naturalWidth, height = image.height || image.naturalHeight, side = Math.min(width, height);
+      if (!side || width * height > MAX_PHOTO_PIXELS) throw new Error("Cette photo est trop grande pour être préparée dans votre navigateur.");
+      const canvas = document.createElement("canvas"); canvas.width = canvas.height = AVATAR_SIZE;
+      const context = canvas.getContext("2d"); if (!context) throw new Error("Votre navigateur ne peut pas préparer cette photo. Essayez une autre image ou un autre navigateur.");
+      context.imageSmoothingQuality = "high"; context.drawImage(image, (width - side) / 2, (height - side) / 2, side, side, 0, 0, AVATAR_SIZE, AVATAR_SIZE);
+      const data = canvas.toDataURL("image/png"); if (!validAvatarData(data)) throw new Error("Cette photo n’a pas pu être préparée. Choisissez une autre image.");
+      return data;
+    } catch (error) { if (error instanceof Error && error.message.startsWith("Cette photo")) throw error; throw new Error("Cette image ne peut pas être lue. Choisissez une autre photo PNG, JPEG ou WebP."); }
+    finally { image?.close?.(); if (objectUrl) URL.revokeObjectURL(objectUrl); }
+  }
+  async function chooseProfilePhoto(file) {
+    if (!file || state.profilePending) return;
+    const serial = ++state.profileSerial; state.profileProcessing = true; profileButtons(); message($("#profile-feedback"), "Préparation de la photo…");
+    try {
+      const data = await prepareProfilePhoto(file);
+      if (serial !== state.profileSerial || !$("#profile-dialog").open) return;
+      state.profileAvatar = data; state.profileDirty = true; renderProfilePreview(); message($("#profile-feedback"), "Votre photo est prête. Enregistrez-la pour la partager avec les invités.", "success");
+    } catch (error) { if (serial === state.profileSerial) message($("#profile-feedback"), error.message, "error"); }
+    finally { if (serial === state.profileSerial) { state.profileProcessing = false; profileButtons(); } $("#profile-photo-input").value = ""; }
+  }
+  async function saveProfile(event) {
+    event.preventDefault(); if (!state.profileDirty || state.profilePending || state.profileProcessing) return;
+    state.profilePending = true; profileButtons(); message($("#profile-feedback"), "Enregistrement de votre photo…");
+    try {
+      const result = await api("/api/profile", { method: "POST", body: { avatar: state.profileAvatar || "" } }), guest = result.guest;
+      if (!guest) throw new Error("Le profil n’a pas pu être actualisé. Réessayez.");
+      const oldId = state.session.guest.avatar_id; Array.from(avatarCache.keys()).filter((key) => key.startsWith(`${oldId}:`)).forEach((key) => avatarCache.delete(key));
+      state.session.guest = guest; if (validAvatarVersion(guest.avatar_version)) cacheAvatar(guest.avatar_id, guest.avatar_version, state.profileAvatar);
+      state.items.forEach((item) => { if (item.avatar_id === guest.avatar_id) item.avatar_version = guest.avatar_version; });
+      syncSession(); renderProposals(); $("#profile-dialog").close(); toast(state.profileAvatar ? "Votre photo de profil est enregistrée." : "Votre photo a été retirée. Vos propositions restent dans la playlist.");
+    } catch (error) { message($("#profile-feedback"), error.message, "error"); }
+    finally { state.profilePending = false; profileButtons(); }
+  }
   function youtubeVideoId(item) {
+    if (item.source_kind === "playlist" || item.kind === "playlist") return null;
     if (typeof item.video_id === "string" && /^[A-Za-z0-9_-]{11}$/.test(item.video_id)) return item.video_id;
     const canonical = /^https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11})$/.exec(item.url || "");
     return canonical?.[1] || null;
@@ -83,7 +243,7 @@
     else $("#event-title").textContent = title;
     document.title = `${title === "La playlist des 25 ans" ? "Les 25 ans de Fanny" : title} · La playlist`;
     $("#guest-name").textContent = guest?.nickname || "Choisir mon pseudo";
-    $("#guest-avatar").textContent = nicknameInitial(guest?.nickname);
+    setAvatar($("#guest-avatar"), guest); fetchAvatars(guest ? [guest] : []);
     const maxProposals = Number(settings.max_proposals ?? 0);
     $("#quota-label").textContent = maxProposals > 0 ? `${maxProposals} idées par invité` : "Autant d’idées que vous voulez";
     $("#invitation-field").classList.toggle("hidden", !settings.invitation_required);
@@ -144,8 +304,14 @@
       message(target, `${error.message} Vous pouvez toujours coller un lien YouTube ou proposer un titre.`, "error"); youtubeFallback(query);
     } finally { if (serial === state.searchSerial) submit.disabled = !!state.session?.settings?.offline_mode; }
   }
+  function chooseProposalScope() { $("#proposal-scope-dialog").showModal(); return new Promise((resolve) => { state.proposalScopeResolve = resolve; }); }
+  function ambiguousYoutubeLink(value) {
+    try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.port && ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(url.hostname) && url.pathname === "/watch" && url.searchParams.getAll("v").length === 1 && url.searchParams.getAll("list").length === 1 && /^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") || "") && /^[A-Za-z0-9_-]{10,200}$/.test(url.searchParams.get("list") || ""); }
+    catch { return false; }
+  }
   async function submitProposal(body, button) {
     if (!await ensureIdentity()) return;
+    if (body.kind === "youtube" && !body.mode && ambiguousYoutubeLink(body.url)) { const mode = await chooseProposalScope(); if (!mode) { message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); return; } body = { ...body, mode }; }
     button.disabled = true;
     message($("#entry-feedback"), "Ajout du morceau…");
     try {
@@ -165,7 +331,10 @@
         if (body.kind === "youtube") $("#link-form").reset();
       }
       await loadProposals();
-    } catch (error) { message($("#entry-feedback"), error.message, "error"); }
+    } catch (error) {
+      if (error.detail?.need_choice && !body.mode) { const mode = await chooseProposalScope(); if (mode) await submitProposal({ ...body, mode }, button); else message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); }
+      else message($("#entry-feedback"), error.message, "error");
+    }
     finally { button.disabled = false; }
   }
   async function voteFor(item, button) {
@@ -231,6 +400,7 @@
     $("#proposal-range-label").textContent = `${first + 1}–${Math.min(first + PAGE_SIZE, items.length)} sur ${items.length} morceaux`;
     $("#proposal-prev").disabled = state.page === 1;
     $("#proposal-next").disabled = state.page === pages;
+    playlistDuration();
     $("#stat-tracks").textContent = state.items.length;
     $("#stat-votes").textContent = state.items.reduce((total, item) => total + Number(item.votes || 0), 0);
     $("#stat-mine").textContent = mine.length;
@@ -245,16 +415,18 @@
       const content = el("div", "track-content"); content.append(el("h3", "track-title", item.title || "Titre à retrouver"));
       content.append(el("p", "track-artist", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")));
       const details = el("div", "track-details"); details.append(el("span", "", duration(item.duration)));
-      if (!item.url) details.append(el("span", "mini-tag", "Une idée à retrouver"));
+      if (item.source_kind === "playlist") details.append(el("span", "mini-tag playlist-tag", "Playlist"));
+      else if (!item.url) details.append(el("span", "mini-tag", "Une idée à retrouver"));
       else if (item.state === "approved") details.append(el("span", "mini-tag approved", "Validé"));
       content.append(details);
+      if (item.source_kind === "playlist" && /^https:\/\/www\.youtube\.com\/playlist\?list=[A-Za-z0-9_-]{2,200}$/.test(item.url || "")) { const source = el("a", "result-source", "Voir la playlist sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer"; const actions = el("div", "track-source-actions"); actions.append(source); content.append(actions); }
       const preview = previewButton(item);
       if (preview) {
         const sourceActions = el("div", "track-source-actions"), source = el("a", "result-source", "Voir sur YouTube →");
         source.href = `https://www.youtube.com/watch?v=${youtubeVideoId(item)}`; source.target = "_blank"; source.rel = "noopener noreferrer";
         sourceActions.append(preview, source); content.append(sourceActions);
       }
-      const bottom = el("div", "track-bottom"); const author = el("span", "track-author"); author.append(el("span", "tiny-avatar", nicknameInitial(item.nickname)), document.createTextNode(item.nickname || "Organisation"));
+      const bottom = el("div", "track-bottom"); const author = el("span", "track-author"), avatar = el("span", "tiny-avatar"); setAvatar(avatar, item); author.append(avatar, document.createTextNode(item.nickname || "Organisation"));
       const button = el("button", `vote-button${item.voted ? " voted" : ""}`); button.type = "button"; button.setAttribute("aria-label", `${item.voted ? "Retirer mon vote pour" : "Voter pour"} ${item.title}`); button.setAttribute("aria-pressed", String(!!item.voted)); button.append(el("span", "heart", item.voted ? "♥" : "♡"), el("span", "", String(item.votes || 0))); button.disabled = state.session?.settings?.votes_open === false; button.addEventListener("click", () => voteFor(item, button)); bottom.append(author, button);
       card.append(visual, content, bottom);
       if (item.mine === true) {
@@ -263,6 +435,7 @@
       }
       list.append(card);
     });
+    fetchAvatars(items.slice(first, first + PAGE_SIZE));
     $("#catalogue-empty").classList.toggle("hidden", items.length > 0);
     $("#catalogue-empty h3").textContent = state.items.length ? "Aucun morceau pour cette recherche." : "Le premier morceau, c’est peut-être le vôtre.";
     $("#catalogue-empty p").textContent = state.mine ? "Vos propositions apparaîtront ici après votre premier ajout." : query ? "Essayez un autre titre, un artiste ou un pseudo." : "Ajoutez une idée pour lancer la playlist.";
@@ -283,12 +456,20 @@
   });
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.closeDialog}`).close()));
   $("#identity-dialog").addEventListener("close", () => { if (state.identityResolve) { state.identityResolve(!!state.session?.guest); state.identityResolve = null; } });
-  $("#identity-button").addEventListener("click", showIdentity);
+  $("#identity-button").addEventListener("click", showProfile);
+  $("#profile-photo-input").addEventListener("change", (event) => chooseProfilePhoto(event.target.files[0]));
+  $("#profile-remove-photo").addEventListener("click", () => { if (state.profilePending || state.profileProcessing) return; state.profileAvatar = ""; state.profileDirty = true; renderProfilePreview(); message($("#profile-feedback"), "Enregistrez pour retirer votre photo. Vos propositions et vos votes restent conservés."); });
+  $("#profile-form").addEventListener("submit", saveProfile);
+  $("#profile-cancel").addEventListener("click", () => { if (!state.profilePending) $("#profile-dialog").close(); });
+  $("#profile-dialog").addEventListener("cancel", (event) => { if (state.profilePending) event.preventDefault(); });
+  $("#profile-dialog").addEventListener("close", () => { state.profileSerial++; state.profileProcessing = false; state.profileDirty = false; $("#profile-photo-input").value = ""; });
   $("#withdraw-confirm").addEventListener("click", withdrawProposal);
   $("#withdraw-cancel").addEventListener("click", () => { if (!state.withdrawalPending) $("#withdraw-dialog").close(); });
   $("#withdraw-dialog").addEventListener("cancel", (event) => { if (state.withdrawalPending) event.preventDefault(); });
   $("#withdraw-dialog").addEventListener("close", () => { if (!state.withdrawalPending) state.withdrawing = null; });
   $("#organisation-button").addEventListener("click", () => $("#organisation-dialog").showModal());
+  [["#proposal-choice-video", "video"], ["#proposal-choice-playlist", "playlist"]].forEach(([selector, mode]) => $(selector).addEventListener("click", () => { const resolve = state.proposalScopeResolve; state.proposalScopeResolve = null; resolve?.(mode); $("#proposal-scope-dialog").close(); }));
+  $("#proposal-scope-dialog").addEventListener("close", () => { state.proposalScopeResolve?.(null); state.proposalScopeResolve = null; });
   $("#preview-dialog").addEventListener("close", clearPreview);
   $("#preview-dialog").addEventListener("cancel", clearPreview);
   $("#identity-form").addEventListener("submit", async (event) => {

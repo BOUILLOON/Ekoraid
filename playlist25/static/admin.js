@@ -9,7 +9,7 @@
   const button = (text, action, classes = "button subtle small") => { const node = el("button", classes, text); node.type = "button"; node.addEventListener("click", action); return node; };
   const feedback = (target, text, type = "info") => { target.replaceChildren(); if (text) target.append(el("p", `feedback ${type}`, text)); };
   const toast = (text) => { const node = el("div", "toast", text); $("#toasts").append(node); window.setTimeout(() => node.remove(), 5000); };
-  const duration = (seconds) => { if (seconds == null || !Number.isFinite(Number(seconds))) return "—"; const n = Math.floor(Number(seconds)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
+  const duration = (seconds) => { if (seconds == null || !Number.isFinite(Number(seconds))) return "—"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; };
   const totalDuration = (seconds) => { const n = Math.floor(Number(seconds || 0) / 60); return n >= 60 ? `${Math.floor(n / 60)} h ${String(n % 60).padStart(2, "0")}` : `${n} min`; };
   const number = (value) => Number(value || 0).toLocaleString("fr");
   function pageItems(items, name, anchor, render) {
@@ -86,7 +86,9 @@
   }
   async function loadDashboard() {
     const data = await api("/api/dashboard");
-    const cards = [[data.proposals, "morceaux proposés", `${number(data.guests)} invités dans la bande`, "coral"], [data.approved, "morceaux validés", `${number(data.pending)} propositions à vérifier`, "indigo"], [data.available, "fichiers disponibles", `${number(data.jobs?.queued)} dans la file`, "lime"], [totalDuration(data.total_duration), "de musique validée", `${number(data.votes)} votes enregistrés`, "cream"]];
+    const unknownDuration = Number(data.total_duration_unknown_count || 0), durationLabel = unknownDuration && data.total_duration_known_count === 0 ? "À compléter" : totalDuration(data.total_duration);
+    const durationDetail = unknownDuration ? `${number(unknownDuration)} durée${unknownDuration > 1 ? "s" : ""} à compléter · ${number(data.votes)} votes enregistrés` : `${number(data.votes)} votes enregistrés`;
+    const cards = [[data.proposals, "morceaux proposés", `${number(data.guests)} invités dans la bande`, "coral"], [data.approved, "morceaux validés", `${number(data.pending)} propositions à vérifier`, "indigo"], [data.available, "fichiers disponibles", `${number(data.jobs?.queued)} dans la file`, "lime"], [durationLabel, "de musique validée · durée connue", durationDetail, "cream"]];
     $("#dashboard-stats").replaceChildren();
     cards.forEach(([count, title, detail, color]) => { const card = el("article", `stat-card ${color}`); card.append(el("span", "stat-card-label", title), el("strong", "", typeof count === "number" ? number(count) : count), el("small", "", detail)); $("#dashboard-stats").append(card); });
     $("#nav-proposal-count").textContent = number(data.proposals);
@@ -96,7 +98,7 @@
   const selectableProposals = () => visibleProposals().filter((item) => !item.withdrawn_at);
   const selectedProposals = () => state.proposals.filter((item) => state.selected.has(item.id) && !item.withdrawn_at);
   const selectedSources = () => Array.from(new Set(selectedProposals().filter((item) => item.url && item.source_id).map((item) => item.source_id)));
-  const selectedReadySources = () => { const selected = new Set(selectedProposals().map((item) => item.source_id)); return state.library.filter((item) => selected.has(item.id)).map((item) => item.id); };
+  const selectedReadySources = () => { const selected = new Set(selectedProposals().flatMap((item) => [item.source_id, ...(item.playlist_source_ids || [])])); return state.library.filter((item) => selected.has(item.id)).map((item) => item.id); };
   async function loadProposals() {
     const [proposals, library] = await Promise.all([api("/api/proposals"), api("/api/library")]);
     state.proposals = proposals.items || []; state.library = library.items || [];
@@ -107,7 +109,8 @@
     const items = selectedProposals(), sources = selectedSources(), ready = selectedReadySources(), missing = items.filter((item) => !item.url).length;
     $("#proposal-selection-count").textContent = `${state.selected.size} proposition${state.selected.size > 1 ? "s" : ""} sélectionnée${state.selected.size > 1 ? "s" : ""}`;
     $("#approve-selected").disabled = !items.length; $("#download-selected").disabled = !sources.length; $("#export-selected-ready").disabled = !ready.length;
-    $("#proposal-source-summary").textContent = `${sources.length} source(s) YouTube distincte(s) · ${ready.length} fichier(s) déjà prêt(s) dans cette sélection${missing ? ` · ${missing} demande(s) à associer à une vidéo avec Modifier` : ""}.`;
+    const playlists = items.filter((item) => item.source_kind === "playlist").length;
+    $("#proposal-source-summary").textContent = `${sources.length} source(s) YouTube distincte(s)${playlists ? `, dont ${playlists} playlist(s) à analyser` : ""} · ${ready.length} fichier(s) déjà prêt(s) dans cette sélection${missing ? ` · ${missing} demande(s) à associer à une vidéo avec Modifier` : ""}.`;
     const visible = selectableProposals(); $("#select-all-proposals").disabled = !visible.length; $("#select-visible").disabled = !visible.length;
     $("#select-all-proposals").checked = visible.length > 0 && visible.every((item) => state.selected.has(item.id)); $("#select-all-proposals").indeterminate = visible.some((item) => state.selected.has(item.id)) && !$("#select-all-proposals").checked;
   }
@@ -119,7 +122,7 @@
       const index = page.start + localIndex;
       const row = el("tr"), checkCell = el("td", "checkbox-cell"), check = el("input"); check.type = "checkbox"; check.checked = state.selected.has(item.id); check.disabled = !!item.withdrawn_at; check.setAttribute("aria-label", `Sélectionner ${item.title}`); check.addEventListener("change", () => { check.checked ? state.selected.add(item.id) : state.selected.delete(item.id); selectionCount(); }); checkCell.append(check);
       const track = el("td", "table-track"); track.append(el("strong", "", item.title), el("small", "", `${item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")} · proposé par ${item.nickname || "Organisation"}`));
-      const sourceBadge = el("small", "muted", item.url ? `Source ${item.source_id} · ${labels[item.status] || item.status}` : "Sans source : associez un lien YouTube"); track.append(sourceBadge);
+      const sourceBadge = el("small", "muted", item.url ? `${item.source_kind === "playlist" ? "Playlist YouTube" : "Source"} ${item.source_id} · ${labels[item.status] || item.status}` : "Sans source : associez un lien YouTube"); track.append(sourceBadge);
       const vote = el("td", "vote-cell", `♡ ${number(item.votes)}`), time = el("td", "nowrap", duration(item.duration)), badge = el("td"); badge.append(item.withdrawn_at ? el("span", "status-badge status-archived", "Retirée par l’invité·e") : status(item.state));
       const actions = el("td", "table-actions"); actions.append(button("Modifier", () => edit(item, "proposal")));
       if (item.state !== "approved" && !item.withdrawn_at) actions.append(button("Valider", (event) => work(event.currentTarget, async () => { await api(`/api/proposals/${item.id}`, { method: "PATCH", body: { state: "approved" } }); await loadProposals(); toast("Proposition validée."); })));
@@ -165,7 +168,12 @@
   function renderQueueFeedback() {
     const result = state.queueResult, target = $("#queue-request-feedback"); target.replaceChildren(); target.append(el("p", "feedback info", queuedText(result)));
     const skipped = Array.isArray(result.skipped) ? result.skipped : [], titles = new Map(state.proposals.map((item) => [item.source_id, item.title]));
-    pageItems(skipped, "queue-feedback", target, renderQueueFeedback).items.forEach((item) => target.append(el("p", "field-help", `${titles.get(item.source_id) || `Source ${item.source_id}`} : ${item.reason || "source non ajoutée"}`)));
+    const details = [
+      ...(result.warnings || []).map((warning) => ({ text: warning, className: "feedback warning" })),
+      ...(result.expanded_playlists || []).map((item) => ({ text: `${item.title || `Playlist ${item.source_id}`} : ${(item.source_ids || []).length} source(s) retrouvée(s), ${item.complete ? "analyse complète" : "analyse incomplète — consultez les avertissements"}. L’ordre d’origine reste enregistré.`, className: item.complete ? "field-help" : "feedback warning" })),
+      ...skipped.map((item) => ({ text: `${titles.get(item.source_id) || `Source ${item.source_id}`} : ${item.reason || "source non ajoutée"}`, className: "field-help" })),
+    ];
+    pageItems(details, "queue-feedback", target, renderQueueFeedback).items.forEach((item) => target.append(el("p", item.className, item.text)));
   }
   async function openReadyExports(sourceIds = null) {
     const items = (await api("/api/library")).items || [], wanted = sourceIds === null ? null : new Set(sourceIds);
@@ -293,7 +301,7 @@
   $("#select-approved").addEventListener("click", () => { state.selected = new Set(state.proposals.filter((item) => item.state === "approved" && !item.withdrawn_at).map((item) => item.id)); renderProposals(); });
   $("#approve-selected").addEventListener("click", (event) => work(event.currentTarget, async () => { await api("/api/proposals", { method: "PATCH", body: { proposal_ids: Array.from(state.selected), state: "approved" } }); await loadProposals(); toast("Sélection validée."); }));
   $("#export-selected-ready").addEventListener("click", () => work(null, () => openReadyExports(selectedReadySources())));
-  $("#download-selected").addEventListener("click", async (event) => { const trigger = event.currentTarget, items = selectedProposals(), sources = selectedSources(); if (!sources.length) { feedback($("#admin-feedback"), "Associez d’abord un lien YouTube aux propositions sélectionnées avec Modifier.", "warning"); return; } if (!await confirmRights(`${sources.length} source(s) précise(s) sélectionnée(s). ${items.filter((item) => !item.url).length ? "Les demandes sans lien seront ignorées et restent à retrouver." : "Les fichiers déjà présents seront réutilisés."}`)) return; await work(trigger, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: sources, rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); });
+  $("#download-selected").addEventListener("click", async (event) => { const trigger = event.currentTarget, items = selectedProposals(), sources = selectedSources(); if (!sources.length) { feedback($("#admin-feedback"), "Associez d’abord un lien YouTube aux propositions sélectionnées avec Modifier.", "warning"); return; } const playlists = items.filter((item) => item.source_kind === "playlist").length; if (!await confirmRights(`${sources.length} source(s) sélectionnée(s). ${playlists ? `${playlists} playlist(s) seront analysées avant la préparation ; les éléments indisponibles et les analyses incomplètes seront signalés. ` : ""}${items.filter((item) => !item.url).length ? "Les demandes sans lien seront ignorées et restent à retrouver." : "Les fichiers déjà présents seront réutilisés."}`)) return; await work(trigger, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: sources, rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); });
   $("#edit-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const { item, kind } = state.editing, body = { title: $("#edit-title").value.trim(), artist: $("#edit-artist").value.trim() }; if (kind === "proposal") { if (!item.withdrawn_at) body.state = $("#edit-state").value; const url = $("#edit-url").value.trim(); if (url && url !== item.url) body.url = url; } const result = await api(`/api/${kind === "library" ? "library" : "proposals"}/${item.id}`, { method: "PATCH", body }); $("#edit-dialog").close(); toast("Morceau mis à jour."); if (result.warnings?.length) feedback($("#admin-feedback"), result.warnings.join(" "), "warning"); await (kind === "library" ? loadLibrary() : loadProposals()); }, $("#edit-feedback")); });
   $("#open-merge").addEventListener("click", () => { $("#merge-query").value = ""; renderMergeChoices(true); $("#merge-confirm").checked = false; feedback($("#merge-feedback"), ""); $("#merge-dialog").showModal(); });
   $("#merge-query").addEventListener("input", () => renderMergeChoices());

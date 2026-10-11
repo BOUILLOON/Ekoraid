@@ -24,6 +24,8 @@ def legacy_collection(tmp_path):
     with closing(db.connect(cfg)) as conn:
         conn.executescript(db.SCHEMA)
         conn.execute('DROP TABLE proposals')
+        conn.execute('DROP TABLE guests')
+        conn.execute('CREATE TABLE guests(id TEXT PRIMARY KEY,nickname TEXT NOT NULL,created_at TEXT NOT NULL)')
         conn.execute(LEGACY_PROPOSALS)
         with conn:
             conn.execute("INSERT INTO guests VALUES('owner','Fanny','2026-10-01')")
@@ -51,6 +53,7 @@ def test_upgrade_preserves_history_and_allows_distinct_readd(tmp_path):
         assert conn.execute("SELECT local_id FROM cloud_map WHERE remote_id='project:123'").fetchone()[0] == '73'
         assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
         assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+        assert tuple(conn.execute("SELECT nickname,avatar_data,avatar_version FROM guests WHERE id='owner'").fetchone()) == ('Fanny', '', '')
         conn.execute("UPDATE proposals SET state='archived',withdrawn_at='2026-10-11' WHERE id=73")
         new_id = conn.execute("INSERT INTO proposals(source_id,guest_id,created_at) VALUES(41,'owner','2026-10-11')").lastrowid
         assert new_id != 73

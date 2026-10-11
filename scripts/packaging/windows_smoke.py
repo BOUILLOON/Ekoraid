@@ -86,7 +86,9 @@ def gui_window(process, timeout=30):
         length = user32.GetWindowTextLengthW(window)
         text = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(window, text, length + 1)
-        if "fanny" in text.value.lower():
+        # The first-run configuration Toplevel also mentions Fanny. Closing
+        # that child leaves the application alive, so require the main window.
+        if text.value == "Studio de Fanny":
             found.append(window)
             return False
         return True
@@ -98,7 +100,7 @@ def gui_window(process, timeout=30):
         if found:
             return found[0]
         time.sleep(0.2)
-    raise RuntimeError("The real frozen desktop GUI did not open its Fanny window.")
+    raise RuntimeError("The real frozen desktop GUI did not open its Studio de Fanny main window.")
 
 
 def stop_process(process):

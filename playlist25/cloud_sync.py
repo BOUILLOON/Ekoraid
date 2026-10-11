@@ -17,6 +17,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 from . import db
+from .providers import SourceError, parse_youtube_url
 
 PUBLISH_BATCH_SIZE = 1000
 
@@ -137,8 +138,11 @@ def _avatar_fields(row):
                 or hashlib.md5(binary, usedforsecurity=False).hexdigest() != version):
             raise ValueError
         with Image.open(io.BytesIO(binary)) as image:
-            if image.format != "PNG" or image.size != (128, 128) or image.mode not in {"RGB", "RGBA"}:
+            if (image.format != "PNG" or image.size != (128, 128) or image.mode not in {"RGB", "RGBA"}
+                    or getattr(image, "n_frames", 1) != 1):
                 raise ValueError
+            image.verify()
+        with Image.open(io.BytesIO(binary)) as image:
             image.load()
     except (ValueError, binascii.Error, OSError, Image.DecompressionBombError):
         raise CloudSyncError("Photo de profil distante invalide : PNG 128 × 128 attendu.") from None
@@ -163,22 +167,35 @@ def _validate(snapshot):
     sources = []
     for row in snapshot["sources"]:
         video_id, url = row.get("video_id"), row.get("url")
+        if url is not None and not isinstance(url, str):
+            raise CloudSyncError("URL distante invalide.")
+        source_kind = "video" if video_id is not None else "manual"
         if video_id is not None:
             if not isinstance(video_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
                 raise CloudSyncError("Source YouTube invalide dans le catalogue distant.")
             if url != "https://www.youtube.com/watch?v=" + video_id:
                 raise CloudSyncError("URL distante non autorisée. Aucun changement local effectué.")
         elif url not in {None, ""}:
-            raise CloudSyncError("Une source manuelle contient une URL non autorisée.")
+            try:
+                parsed = parse_youtube_url(url, mode="playlist")
+                if parsed["kind"] != "playlist" or parsed["url"] != url:
+                    raise SourceError("Playlist non canonique.")
+            except SourceError:
+                raise CloudSyncError("URL de playlist distante non autorisée.") from None
+            source_kind = "playlist"
         duration = row.get("duration")
         if duration is not None and (isinstance(duration, bool) or not isinstance(duration, (int, float))
                                      or not math.isfinite(duration) or not 0 < duration < 1e8):
             raise CloudSyncError("Durée invalide dans le catalogue distant.")
+        title = row.get("title")
+        if source_kind == "playlist" and (title is None or isinstance(title, str) and not title.strip()):
+            title = "Playlist YouTube proposée"
         sources.append({"id": _identifier(row.get("id")), "video_id": video_id, "url": url or None,
-                        "title": _text(row.get("title"), 300, required=True),
+                        "title": _text(title, 300, required=True),
                         "artist": _text(row.get("artist", ""), 150),
                         "channel": _text(row.get("channel", ""), 300),
-                        "duration": duration, "thumbnail": "", "status": "pending",
+                        "duration": None if source_kind == "playlist" else duration,
+                        "source_kind": source_kind, "thumbnail": "", "status": "pending",
                         "created_at": _date(row.get("created_at"))})
     source_ids = {s["id"] for s in sources}
     if len(source_ids) != len(sources):
@@ -236,11 +253,17 @@ def import_snapshot(cfg, conn, snapshot):
         for row in sources:
             sid = mapped("source", row["id"])
             if sid is not None and conn.execute("SELECT 1 FROM sources WHERE id=?", (sid,)).fetchone():
+                if row["duration"] is not None:
+                    conn.execute("UPDATE sources SET duration=? WHERE id=? AND duration IS NULL", (row["duration"], sid))
                 continue
             already_exists = row["video_id"] and conn.execute("SELECT 1 FROM sources WHERE video_id=?", (row["video_id"],)).fetchone()
-            sid = db.upsert_source(conn, row)
+            playlist = conn.execute("SELECT id FROM sources WHERE video_id IS NULL AND url=? ORDER BY id LIMIT 1",
+                                    (row["url"],)).fetchone() if row["source_kind"] == "playlist" else None
+            sid = playlist["id"] if playlist else db.upsert_source(conn, row)
+            if row["duration"] is not None:
+                conn.execute("UPDATE sources SET duration=? WHERE id=? AND duration IS NULL", (row["duration"], sid))
             remember("source", row["id"], sid)
-            new_sources += int(not already_exists)
+            new_sources += int(not already_exists and not playlist)
         active_remote_locals = {mapped("proposal", row["id"]) for row in proposals
                                 if row["withdrawn_at"] is None and row["state"] in {"pending", "approved"}}
         # First record withdrawals so re-additions can use a fresh proposal ID.

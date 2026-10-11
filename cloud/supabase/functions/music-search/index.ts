@@ -1,5 +1,5 @@
 // Déployer avec Supabase Edge Functions. Aucun SDK/CDN ni accès service_role.
-import { parseOfficialSearch, parseYouTubeHTML } from "./parser.mjs";
+import { parseOfficialSearch, parseYouTubeHTML, parseYouTubeVideoHTML } from "./parser.mjs";
 
 const cors = { "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -41,10 +41,15 @@ Deno.serve(async (request: Request) => {
     const raw = await boundedText(new Response(request.body), 4096);
     let body;
     try { body = JSON.parse(raw); } catch { throw new SearchError("Saisie invalide.", 422); }
+    const action = body.action || "search";
     const query = typeof body.query === "string" ? body.query.trim() : "";
-    if (query.length < 3 || query.length > 120 || /[\x00-\x1f\x7f]/.test(query)
-        || typeof body.guest_token !== "string" || !/^[0-9a-f]{64}$/.test(body.guest_token))
+    if (!["search", "video"].includes(action) || typeof body.guest_token !== "string"
+        || !/^[0-9a-f]{64}$/.test(body.guest_token))
+      throw new SearchError("Saisie ou identité invalide.", 422);
+    if (action === "search" && (query.length < 3 || query.length > 120 || /[\x00-\x1f\x7f]/.test(query)))
       throw new SearchError("Tapez entre 3 et 120 caractères pour chercher.", 422);
+    if (action === "video" && (typeof body.video_id !== "string" || !/^[A-Za-z0-9_-]{11}$/.test(body.video_id)))
+      throw new SearchError("Ce lien doit désigner un morceau YouTube précis.", 422);
     const supabase = Deno.env.get("SUPABASE_URL") || "";
     const anon = Deno.env.get("SUPABASE_ANON_KEY") || "";
     if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(supabase) || !anon)
@@ -53,12 +58,20 @@ Deno.serve(async (request: Request) => {
     const rpcHeaders: Record<string, string> = {"Content-Type": "application/json", "apikey": anon};
     if (anon.startsWith("eyJ")) rpcHeaders.Authorization = `Bearer ${anon}`;
     const budgetResponse = await fetch(`${supabase.replace(/\/$/, "")}/rest/v1/rpc/playlist25_search_budget`, {
-      method: "POST", headers: rpcHeaders, body: JSON.stringify({p_token: body.guest_token, p_official: Boolean(apiKey)}),
+      method: "POST", headers: rpcHeaders, body: JSON.stringify({p_token: body.guest_token, p_official: action === "search" && Boolean(apiKey)}),
       signal: AbortSignal.timeout(5000), redirect: "error",
     });
     if (!budgetResponse.ok) throw new SearchError("Les limites de recherche ne sont pas configurées. L’organisateur doit exécuter le script SQL.");
     const budget = JSON.parse(await boundedText(budgetResponse, 8192));
     if (!budget.allowed) throw new SearchError(budget.error || "Recherche momentanément limitée.", budget.status || 429);
+    if (action === "video") {
+      const endpoint = `https://www.youtube.com/watch?${new URLSearchParams({v: body.video_id, hl: "fr"})}`;
+      const response = await fetch(endpoint, {headers: {"Accept-Language": "fr-FR,fr;q=0.9", "User-Agent": "Playlist25/1.0"},
+        signal: AbortSignal.timeout(8000), redirect: "error"});
+      if (!response.ok) throw new SearchError("YouTube n’a pas fourni les métadonnées de ce lien. La durée restera inconnue jusqu’à vérification.");
+      return answer({item: parseYouTubeVideoHTML(await boundedText(response, 3 * 1024 * 1024), body.video_id),
+        provider: "youtube-public-video"});
+    }
     let items;
     if (apiKey) {
       const params = new URLSearchParams({part: "snippet", type: "video", maxResults: "5", q: query, key: apiKey});

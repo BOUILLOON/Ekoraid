@@ -54,8 +54,8 @@ def install_schema(ref):
     sql=(HERE/'supabase.sql').read_text(encoding='utf-8')
     management_request(ref,'POST','/database/query',{'query':sql,'read_only':False})
     # Only return counts, never guest data or account keys.
-    verified=management_request(ref,'POST','/database/query',{'query':"SELECT count(*) AS functions FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('playlist25_session','playlist25_propose','playlist25_vote','playlist25_withdraw','playlist25_snapshot','playlist25_admin_publish')",'read_only':True})
-    if not isinstance(verified,list) or not verified or int(verified[0].get('functions',0))!=6:
+    verified=management_request(ref,'POST','/database/query',{'query':"SELECT count(*) AS functions FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('playlist25_session','playlist25_propose','playlist25_vote','playlist25_withdraw','playlist25_profile','playlist25_avatars','playlist25_snapshot','playlist25_admin_publish')",'read_only':True})
+    if not isinstance(verified,list) or not verified or int(verified[0].get('functions',0))!=8:
         raise DeployError('La vérification des fonctions attendues a échoué ; aucune readiness n’est revendiquée.')
     print('Schéma et permissions Supabase installés et vérifiés.')
 

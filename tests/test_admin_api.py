@@ -1,6 +1,7 @@
 from pathlib import Path
 import copy
 import shutil
+import sqlite3
 import subprocess
 
 import pytest
@@ -39,6 +40,22 @@ def test_auth_and_session_separation(cfg):
     assert public.get('/api/session').json()['guest'] is None
     assert client.post('/api/logout',headers=headers).status_code==200
     assert client.get('/api/dashboard').status_code==401
+
+
+@pytest.mark.parametrize('unknown_duration',[None,0])
+def test_dashboard_duration_counts_distinct_known_sources_and_reports_unknown(cfg,unknown_duration):
+    with db.connect(cfg) as conn:
+        known=db.upsert_source(conn,{'title':'Morceau connu','duration':245.5})
+        unknown=db.upsert_source(conn,{'title':'Playlist encore inconnue','url':'https://www.youtube.com/playlist?list=PL_TEST12345','duration':unknown_duration})
+        pending=db.upsert_source(conn,{'title':'Pas encore validé','duration':1000})
+        for source,state in ((known,'approved'),(known,'approved'),(unknown,'approved'),(pending,'pending')):
+            conn.execute('INSERT INTO proposals(source_id,state,created_at) VALUES(?,?,?)',(source,state,db.now()))
+    client,_=admin(cfg)
+    dashboard=client.get('/api/dashboard').json()
+    assert dashboard['approved']==3
+    assert dashboard['total_duration']==245.5
+    assert dashboard['total_duration_known_count']==1
+    assert dashboard['total_duration_unknown_count']==1
 
 
 def analysis_fixture():
@@ -89,7 +106,7 @@ def test_ambiguous_url_choice_and_offline_downloads(cfg,monkeypatch):
 
 def test_moderation_metadata_and_merge_preserve_votes_and_cloud_mapping(cfg):
     with db.connect(cfg) as conn:
-        for id in ('a','b'): conn.execute('INSERT INTO guests VALUES(?,?,?)',(id,id,db.now()))
+        for id in ('a','b'): conn.execute('INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?)',(id,id,db.now()))
         s1=db.upsert_source(conn,{'title':'Ancien titre'}); s2=db.upsert_source(conn,{'title':'Autre titre'})
         p1=conn.execute('INSERT INTO proposals(source_id,guest_id,created_at) VALUES(?,?,?)',(s1,'a',db.now())).lastrowid
         p2=conn.execute('INSERT INTO proposals(source_id,guest_id,created_at) VALUES(?,?,?)',(s2,'b',db.now())).lastrowid
@@ -111,7 +128,7 @@ def test_moderation_metadata_and_merge_preserve_votes_and_cloud_mapping(cfg):
 
 def withdrawn_fixture(cfg):
     with db.connect(cfg) as conn:
-        conn.execute('INSERT INTO guests VALUES(?,?,?)',('withdraw-owner','Invitée',db.now()))
+        conn.execute('INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?)',('withdraw-owner','Invitée',db.now()))
         source=db.upsert_source(conn,{'title':'Demande retirée'})
         withdrawn_at=db.now()
         removed=conn.execute('INSERT INTO proposals(source_id,guest_id,state,created_at,withdrawn_at) VALUES(?,?,?,?,?)',
@@ -173,6 +190,196 @@ def test_bulk_moderation_missing_proposal_does_not_change_existing_one(cfg):
     assert result.status_code==404
     with db.connect(cfg) as conn:
         assert conn.execute('SELECT state FROM proposals WHERE id=?',(ordinary,)).fetchone()[0]=='pending'
+
+
+def test_bulk_moderation_over_twenty_thousand_uses_one_atomic_transaction(cfg,monkeypatch):
+    count=20001
+    with db.connect(cfg) as conn:
+        source=db.upsert_source(conn,{'title':'Catalogue de grande soirée'})
+        conn.executemany('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',[(source,db.now())]*count)
+    original_connect=db.connect
+    def limited_connection(config):
+        connection=original_connect(config)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,999)
+        return connection
+    monkeypatch.setattr(db,'connect',limited_connection)
+    client,headers=admin(cfg)
+    ids=list(range(1,count+1))
+    result=client.patch('/api/proposals',json={'proposal_ids':ids,'state':'approved'},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['count']==count
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE state="approved"').fetchone()[0]==count
+        conn.execute('UPDATE proposals SET state="archived",withdrawn_at=? WHERE id=?',(db.now(),count))
+    result=client.patch('/api/proposals',json={'proposal_ids':ids,'state':'pending'},headers=headers)
+    assert result.status_code==409,result.text
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE state="approved"').fetchone()[0]==count-1
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE state="pending"').fetchone()[0]==0
+
+
+def test_playlist_over_twenty_thousand_preserves_all_positions_when_unlimited(cfg,monkeypatch):
+    count=20001
+    fixture=analysis_fixture()
+    fixture['complete']=True
+    fixture['warnings']=[]
+    fixture['entries']=[dict(fixture['entries'][0],position=position) for position in range(1,count+1)]
+    monkeypatch.setattr(providers,'analyze',lambda *a,**k:copy.deepcopy(fixture))
+    client,headers=admin(cfg)
+    result=client.post('/api/playlists/analyze',json={'url':fixture['source_url']},headers=headers)
+    assert result.status_code==200,result.text
+    token=result.json()['token']
+    result=client.post('/api/playlists/import',json={'analysis':{'token':token},'positions':list(range(1,count+1))},headers=headers)
+    assert result.status_code==200,result.text
+    assert len(result.json()['source_ids'])==1
+    with db.connect(cfg) as conn:
+        assert tuple(conn.execute('SELECT COUNT(*),MIN(position),MAX(position),SUM(selected) FROM playlist_entries').fetchone())==(count,1,count,count)
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==1
+    assert client.patch('/api/settings',json={'max_playlist_items':count-1},headers=headers).status_code==200
+    assert client.post('/api/playlists/analyze',json={'url':fixture['source_url']},headers=headers).status_code==422
+    assert client.patch('/api/settings',json={'max_playlist_items':0,'max_proposals':0},headers=headers).status_code==200
+
+
+def test_large_download_and_export_selections_reach_business_validation_without_count_cap(cfg):
+    client,headers=admin(cfg)
+    ids=list(range(1,20002))
+    for route,payload in (('/api/downloads',{'source_ids':ids,'rights_confirmed':True}),
+                          ('/api/exports',{'source_ids':ids,'make_zip':True})):
+        result=client.post(route,json=payload,headers=headers)
+        assert result.status_code==404,result.text
+
+
+def test_reorder_over_twenty_thousand_is_atomic_and_preserves_withdrawal_and_votes(cfg,monkeypatch):
+    count=20001
+    with db.connect(cfg) as conn:
+        source=db.upsert_source(conn,{'title':'Grand catalogue à réordonner'})
+        conn.executemany('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',[(source,db.now())]*count)
+        withdrawn_at=db.now()
+        conn.execute('UPDATE proposals SET state="archived",withdrawn_at=? WHERE id=?',(withdrawn_at,count))
+        conn.execute('INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?)',('voter','Invitée',db.now()))
+        conn.execute('INSERT INTO votes VALUES(?,?,?)',(1,'voter',db.now()))
+    original_connect=db.connect
+    def limited_connection(config):
+        connection=original_connect(config)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,999)
+        return connection
+    monkeypatch.setattr(db,'connect',limited_connection)
+    client,headers=admin(cfg)
+    ids=list(range(count,0,-1))
+    assert client.put('/api/proposals/order',json={'proposal_ids':ids}).status_code==403
+    result=client.put('/api/proposals/order',json={'proposal_ids':ids},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['count']==count
+    with db.connect(cfg) as conn:
+        assert [row[0] for row in conn.execute('SELECT id FROM proposals ORDER BY sort_order')]==ids
+        assert tuple(conn.execute('SELECT state,withdrawn_at FROM proposals WHERE id=?',(count,)).fetchone())==('archived',withdrawn_at)
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE state="pending"').fetchone()[0]==count-1
+        assert conn.execute('SELECT COUNT(*) FROM votes').fetchone()[0]==1
+    assert client.put('/api/proposals/order',json={'proposal_ids':[1,1]},headers=headers).status_code==422
+    assert client.put('/api/proposals/order',json={'proposal_ids':[True]},headers=headers).status_code==422
+    result=client.put('/api/proposals/order',json={'proposal_ids':list(range(1,count))+[9999999]},headers=headers)
+    assert result.status_code==404,result.text
+    with db.connect(cfg) as conn:
+        assert [row[0] for row in conn.execute('SELECT id FROM proposals ORDER BY sort_order')]==ids
+    result=client.put('/api/proposals/order',json={'proposal_ids':[2,1]},headers=headers)
+    assert result.status_code==200 and result.json()['count']==2
+
+
+def playlist_proposal_fixture(cfg):
+    fixture=analysis_fixture()
+    with db.connect(cfg) as conn:
+        direct=db.upsert_source(conn,fixture['entries'][0])
+        playlist=db.upsert_source(conn,{'url':fixture['source_url'],'title':'Playlist de l’invitée'})
+        proposal=conn.execute('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',(playlist,db.now())).lastrowid
+    return fixture,direct,playlist,proposal
+
+
+def test_selected_guest_playlist_expands_only_after_rights_and_deduplicates_mixed_tracks(cfg,monkeypatch):
+    fixture,direct,playlist,proposal=playlist_proposal_fixture(cfg)
+    calls=[]
+    def analyze(url,config,mode=None):
+        calls.append((url,mode))
+        return copy.deepcopy(fixture)
+    monkeypatch.setattr(providers,'analyze',analyze)
+    client,headers=admin(cfg)
+    assert client.post('/api/downloads',json={'source_ids':[direct,playlist]},headers=headers).status_code==422
+    assert calls==[]
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM playlists').fetchone()[0]==0
+    result=client.post('/api/downloads',json={'source_ids':[direct,playlist],'rights_confirmed':True},headers=headers)
+    assert result.status_code==200,result.text
+    body=result.json()
+    assert body['queued']==[direct]
+    assert calls==[(fixture['source_url'],'playlist')]
+    assert body['expanded_playlists'][0]['source_ids']==[direct]
+    assert body['expanded_playlists'][0]['complete'] is False
+    assert any('incomplète' in warning for warning in body['warnings'])
+    assert any('indisponible' in warning for warning in body['warnings'])
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT source_id FROM proposals WHERE id=?',(proposal,)).fetchone()[0]==playlist
+        assert conn.execute('SELECT video_id FROM sources WHERE id=?',(playlist,)).fetchone()[0] is None
+        assert [tuple(row) for row in conn.execute('SELECT position,source_id,available,selected FROM playlist_entries ORDER BY position')]==[(1,direct,1,1),(2,direct,1,1),(3,None,0,0)]
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
+    item=next(item for item in client.get('/api/proposals').json()['items'] if item['id']==proposal)
+    assert item['source_kind']=='playlist' and item['playlist_source_ids']==[direct]
+    repeated=client.post('/api/downloads',json={'source_ids':[playlist],'rights_confirmed':True},headers=headers)
+    assert repeated.status_code==200 and repeated.json()['queued']==[]
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
+
+
+def test_inaccessible_selected_playlist_warns_without_losing_direct_track(cfg,monkeypatch):
+    fixture,direct,playlist,_=playlist_proposal_fixture(cfg)
+    def inaccessible(*args,**kwargs):
+        raise providers.SourceError('Playlist privée ou inaccessible',code='unavailable',status=503)
+    monkeypatch.setattr(providers,'analyze',inaccessible)
+    client,headers=admin(cfg)
+    result=client.post('/api/downloads',json={'source_ids':[playlist,direct],'rights_confirmed':True},headers=headers)
+    assert result.status_code==200,result.text
+    body=result.json()
+    assert body['queued']==[direct] and body['expanded_playlists']==[]
+    assert body['skipped'][0]['source_id']==playlist
+    assert 'Playlist de l’invitée' in body['warnings'][0] and 'inaccessible' in body['warnings'][0]
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM playlists').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==2
+
+
+def test_bad_playlist_provider_metadata_leaves_no_partial_import(cfg,monkeypatch):
+    fixture,direct,playlist,_=playlist_proposal_fixture(cfg)
+    fixture['entries'][1]['url']='https://example.com/not-a-video'
+    monkeypatch.setattr(providers,'analyze',lambda *args,**kwargs:copy.deepcopy(fixture))
+    client,headers=admin(cfg)
+    result=client.post('/api/downloads',json={'source_ids':[playlist,direct],'rights_confirmed':True},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['queued']==[direct] and result.json()['warnings']
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM playlists').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM playlist_entries').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==2
+
+
+def test_playlist_storage_failure_rolls_back_its_rows_and_keeps_other_selection(cfg,monkeypatch):
+    fixture,direct,playlist,_=playlist_proposal_fixture(cfg)
+    fixture['entries'][0].update(video_id='jNQXAC9IVRw',url='https://www.youtube.com/watch?v=jNQXAC9IVRw')
+    monkeypatch.setattr(providers,'analyze',lambda *args,**kwargs:copy.deepcopy(fixture))
+    original_upsert=db.upsert_source
+    calls=[]
+    def fail_second_entry(conn,entry):
+        calls.append(entry)
+        if len(calls)==2: raise ValueError('Métadonnée invalide à la seconde entrée')
+        return original_upsert(conn,entry)
+    monkeypatch.setattr(db,'upsert_source',fail_second_entry)
+    client,headers=admin(cfg)
+    result=client.post('/api/downloads',json={'source_ids':[playlist,direct],'rights_confirmed':True},headers=headers)
+    assert result.status_code==200,result.text
+    assert result.json()['queued']==[direct] and result.json()['warnings']
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM playlists').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM playlist_entries').fetchone()[0]==0
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==2
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
 
 
 def test_real_audio_upload_rename_pack_download_and_guest_cannot_fetch(cfg):

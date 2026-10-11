@@ -1,5 +1,9 @@
 """Native setup keeps local/private configuration and existing music intact."""
 from pathlib import Path
+import json
+import os
+import subprocess
+import sys
 
 from dotenv import dotenv_values
 import pytest
@@ -80,3 +84,20 @@ def test_adoption_changes_only_pointer_and_never_moves_old_files(tmp_path, monke
     with pytest.raises(ValueError):
         desktop.remember_installation(tmp_path / "dossier vide")
     assert desktop.selected_home() == previous.resolve()
+
+
+def test_adoption_does_not_inherit_previous_database_or_cloud(tmp_path, monkeypatch):
+    previous = tmp_path / "previous installation"
+    adopted = tmp_path / "adopted installation"
+    initialize_local_config(adopted)
+    monkeypatch.setenv("DATA_DIR", str(previous / "separate data"))
+    monkeypatch.setenv("SUPABASE_URL", "https://old.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "old-private-fixture")
+    environment = desktop.adoption_environment(adopted)
+    assert environment["PATH"] == os.environ["PATH"]
+    result = subprocess.run(
+        [sys.executable, "-c", "import json; from playlist25.config import load_settings; c=load_settings(); print(json.dumps({'data_dir':str(c.data_dir),'cloud':bool(c.supabase_url or c.supabase_service_role_key)}))"],
+        env=environment, capture_output=True, text=True, check=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert json.loads(result.stdout) == {"data_dir": str(adopted.resolve() / "data"), "cloud": False}

@@ -24,9 +24,9 @@ function safeThumbnail(value) {
   return "";
 }
 
-export function initialData(html) {
+function initialObject(html, name) {
   if (typeof html !== "string" || html.length > 4 * 1024 * 1024) throw new Error("Réponse de recherche trop volumineuse.");
-  const markers = /(?:var\s+ytInitialData\s*=|window\s*\[\s*["']ytInitialData["']\s*\]\s*=|(?:^|[;\s])ytInitialData\s*=)\s*/g;
+  const markers = new RegExp(`(?:var\\s+${name}\\s*=|window\\s*\\[\\s*["']${name}["']\\s*\\]\\s*=|(?:^|[;\\s])${name}\\s*=)\\s*`, "g");
   let match;
   while ((match = markers.exec(html))) {
     const start = markers.lastIndex;
@@ -46,6 +46,25 @@ export function initialData(html) {
     }
   }
   throw new Error("YouTube n’a pas fourni de résultats lisibles. Utilisez un lien ou une proposition manuelle.");
+}
+
+export function initialData(html) { return initialObject(html, "ytInitialData"); }
+
+export function parseYouTubeVideoHTML(html, expectedId) {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(expectedId || "")) throw new Error("Identifiant de vidéo invalide.");
+  const data = initialObject(html, "ytInitialPlayerResponse");
+  const video = data.videoDetails;
+  if (data.playabilityStatus?.status !== "OK" || video?.videoId !== expectedId
+      || video.isLive || data.playabilityStatus?.liveStreamability
+      || typeof video.title !== "string" || !video.title.trim())
+    throw new Error("YouTube n’a pas fourni de métadonnées accessibles pour ce morceau.");
+  const duration = /^[0-9]{1,8}$/.test(String(video.lengthSeconds || "")) ? Number(video.lengthSeconds) : null;
+  const thumbnails = video.thumbnail?.thumbnails || [];
+  return {video_id: expectedId, url: `https://www.youtube.com/watch?v=${expectedId}`,
+    title: video.title.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 300), artist: "",
+    channel: String(video.author || "").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 150),
+    duration: duration !== null && duration > 0 && duration < 1e8 ? duration : null,
+    thumbnail: safeThumbnail(thumbnails[thumbnails.length - 1]?.url), status: "pending"};
 }
 
 export function parseYouTubeHTML(html, limit = 5) {

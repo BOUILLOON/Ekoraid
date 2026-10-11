@@ -15,7 +15,7 @@ import webbrowser
 
 from dotenv import dotenv_values, load_dotenv, set_key
 
-from .config import ROOT, initialize_local_config, load_settings
+from .config import ROOT, Settings, initialize_local_config, load_settings
 
 PUBLIC_URL = "https://bouilloon.github.io/Ekoraid/"
 PROJECT_URL = "https://dpcohlyczczaqovblzin.supabase.co"
@@ -90,6 +90,16 @@ def current_settings():
     # Reload after a native form saved settings, before starting child services.
     load_dotenv(ROOT / ".env.local", override=True)
     return load_settings()
+
+
+def adoption_environment(home: Path) -> dict[str, str]:
+    """An adopted installation reads its own settings, never the previous ones."""
+    environment = os.environ.copy()
+    for name in Settings.__dataclass_fields__:
+        if name != "root":
+            environment.pop(name.upper(), None)
+    environment["PLAYLIST25_HOME"] = str(Path(home).resolve())
+    return environment
 
 
 def service_command(*arguments: str) -> list[str]:
@@ -383,8 +393,7 @@ class StudioWindow:
         try:
             home = Path(selected).resolve()
             remember_installation(home)
-            environment = os.environ.copy()
-            environment["PLAYLIST25_HOME"] = str(home)
+            environment = adoption_environment(home)
             command = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / "studio_entry.py")]
             subprocess.Popen(command, env=environment, cwd=str(home))
             self.destroy()

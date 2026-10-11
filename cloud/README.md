@@ -6,6 +6,8 @@ Le site invités est publié à **https://bouilloon.github.io/Ekoraid/**. Le wor
 
 Le projet choisi est `https://dpcohlyczczaqovblzin.supabase.co`. Sa configuration **publique** est dans `cloud/public-config.json`. Le SQL et la fonction de recherche ont été déployés sur ce projet et vérifiés en ligne. Le rapport [de validation](../docs/VALIDATION.md) distingue ces contrôles du déploiement Pages et des essais locaux.
 
+**Pour administrer le site déjà publié, suivez le [guide de l’administration](../docs/ADMINISTRATION.md).** L’application Windows vous permet de renseigner la connexion privée dans une fenêtre, sans terminal. Les sections 1 à 3 ci-dessous servent à reproduire le déploiement ; elles ne sont pas à refaire pour utiliser le site de Fanny.
+
 ## 1. Préparer Supabase
 
 Un compte Supabase gratuit et un projet de l’offre Free suffisent. Aucun compte n’est demandé aux invités. Si vous avez déjà le projet choisi, ouvrez-le dans [le tableau de bord Supabase](https://supabase.com/dashboard).
@@ -79,7 +81,11 @@ Le workflow est manuel : un commit ne publie pas automatiquement. Si les workflo
 
 ## 4. Récupérer la collecte sur votre PC
 
-Installez et lancez l’application locale selon [le README](../README.md). Dans le fichier privé `.env.local` de votre PC, ajoutez :
+Installez la version Windows autonome selon [le guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée). Au premier démarrage, ou après **Arrêter le studio → Configurer la connexion**, renseignez le projet `https://dpcohlyczczaqovblzin.supabase.co`. Cliquez sur **Ouvrir la page de ma clé Supabase**, copiez sa clé **Secret** ou **service_role** dans le champ privé, puis **Enregistrer et ouvrir le studio**. La connexion est vérifiée avant d’être enregistrée ; une erreur conserve la configuration précédente.
+
+La clé reste sur le PC. Ne la copiez jamais dans le site, les variables publiques du workflow ou une capture d’écran. Les clés secret modernes `sb_secret_…` et les clés JWT service_role anciennes sont prises en charge. Au lancement, le studio récupère la collecte avant d’ouvrir le navigateur, sauf en mode hors ligne, et ne prépare aucun audio automatiquement.
+
+**Pour l’installation depuis les sources uniquement**, complétez le fichier privé `.env.local` déjà créé, en conservant les autres valeurs et les secrets générés :
 
 ```dotenv
 SUPABASE_URL=https://dpcohlyczczaqovblzin.supabase.co
@@ -87,17 +93,21 @@ SUPABASE_SERVICE_ROLE_KEY=VOTRE_CLE_SECRETE_OU_SERVICE_ROLE
 PUBLIC_URL=VOTRE_LIEN_GITHUB_PAGES
 ```
 
-Copiez la clé secrète/service_role depuis **Project Settings → API Keys**. Ce fichier est ignoré par Git ; ne le partagez pas. La clé privilégiée ne doit jamais être copiée dans le site, les variables publiques du workflow ou une capture d’écran. Les clés secret modernes `sb_secret_…` et les clés JWT service_role anciennes sont prises en charge.
+Ce fichier est ignoré par Git ; ne le partagez pas. Pour le site de Fanny, `PUBLIC_URL` est `https://bouilloon.github.io/Ekoraid/`.
 
 1. Ouvrez l’administration locale `http://127.0.0.1:8001` et connectez-vous.
 2. Dans **Réglages & diagnostics**, cliquez **Récupérer les propositions du site public**. Cette opération lit un snapshot cohérent des propositions et votes ; elle ne télécharge aucun audio.
 3. Modérez les propositions, corrigez les titres et associez les demandes textuelles à une source précise. Les corrections, fichiers audio, votes locaux et états locaux sont conservés lors des récupérations suivantes.
-4. Pour appliquer les ouvertures/fermetures, quotas par invité, métadonnées et modération au site Internet, cliquez explicitement **Publier les réglages et la modération sur le site public**. Une modification locale seule ne change pas le site public.
+4. Pour appliquer les ouvertures/fermetures, le nombre de propositions par invité, les métadonnées et la modération au site Internet, cliquez explicitement **Publier les réglages et la modération sur le site public**. **0** dans **Propositions par invité** signifie illimité. Une modification locale seule ne change pas le site public.
 5. Sélectionnez les sources autorisées, confirmez vos droits d’usage et lancez les téléchargements locaux. Préparez ensuite le pack Mixxx et vérifiez-le avec Internet coupé.
 
 La récupération met à jour les votes cloud, y compris les votes retirés. Les votes faits localement dans la salle restent distincts et sont conservés. Un rapprochement local entre plusieurs propositions est publié en archivant les anciennes entrées publiques et en regroupant les votes, avec un seul vote par session pour le morceau résultant.
 
 La publication ne transfère aucun audio ni secret. L’association d’une demande manuelle à une autre source/URL reste locale ; le titre et l’artiste corrigés sont publiés, mais le lien original de la proposition cloud reste conservé. Les choix de téléchargement et exports restent toujours privés.
+
+Les invités peuvent aussi proposer un **lien de playlist YouTube entière**, conservé comme une seule proposition. Une URL qui comprend une vidéo et une playlist demande le choix **Ce morceau seulement** ou **Toute la playlist**. Lors de **Préparer les fichiers de la sélection**, le studio analyse les playlists choisies avant de préparer les morceaux disponibles, et signale les éléments indisponibles ou toute analyse incomplète. Le site public n’analyse ni ne télécharge ces fichiers à lui seul.
+
+Le total public **Durée connue de toute la playlist** additionne les durées disponibles des morceaux distincts. Les durées manquantes et les playlists non analysées restent à compléter : ce total partiel ne les assimile pas à zéro minute. La préparation locale conserve aussi l’ordre d’origine des playlists pour les exports.
 
 ## 5. Invitations et limites
 
@@ -112,14 +122,13 @@ update public.playlist25_settings set invitation_required=true where singleton;
 
 Les codes apparaissent seulement au moment de leur création ; seule leur empreinte est enregistrée. Transmettez chaque code individuellement. Un code ne peut être lié qu’à une session. Activer l’option après le début de la collecte oblige aussi les anciens invités à renseigner un code pour proposer/voter/rechercher. Les codes générés par l’administration **locale** n’ouvrent pas le site cloud : créez les codes cloud avec la requête ci-dessus.
 
-Limites par défaut : 10 propositions par session, 2 000 invités, 2 000 propositions au total, 100 000 votes au total ; 20 recherches/minute par jeton et 120 globalement ; budgets distincts pour les autres actions. Les mutations sont transactionnelles. Les doublons de vidéo et les demandes manuelles exactement identiques proposent un vote ; les titres proches produisent un avertissement sans fusion automatique des versions.
+Les propositions sont illimitées par défaut : `max_proposals=0`. Il n’y a pas de plafond cumulatif de nombre d’invités, de propositions ou de votes imposé par l’application. Les actions restent limitées par minute pour éviter les abus : 20 recherches/minute par jeton et 120 globalement, avec des budgets distincts pour les autres actions. Les mutations sont transactionnelles. Les doublons de vidéo et les demandes manuelles exactement identiques proposent un vote ; les titres proches produisent un avertissement sans fusion automatique des versions.
 
 Les réglages avancés peuvent être ajustés dans SQL Editor :
 
 ```sql
 update public.playlist25_settings
-set event_name='La playlist des 25 ans', max_proposals=10,
-    max_guests=2000, max_total_proposals=2000, max_total_votes=100000
+set event_name='La playlist des 25 ans', max_proposals=0
 where singleton;
 ```
 
