@@ -130,6 +130,10 @@ Le bouton **Écouter** ouvre un aperçu YouTube uniquement après un clic. Il n�
 
 Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le studio**. Pour un diagnostic, utilisez **Réglages & diagnostics → Vérifier les prérequis**. Pour corriger Supabase, arrêtez le studio, puis utilisez **Configurer la connexion**. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
 
+Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, elle vient du lanceur. Choisissez une [release officielle](https://github.com/BOUILLOON/Ekoraid/releases) dont les notes confirment le lancement par double-clic **sans console**. Extrayez le nouveau ZIP dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation : votre configuration et vos données restent à leur emplacement, sans connexion à refaire.
+
+Un message Windows **« Windows a protégé votre ordinateur »** ou **« Éditeur inconnu »** est différent : SmartScreen signale l’absence de signature d’éditeur. Vérifiez la provenance officielle du ZIP ; **Informations complémentaires** permet de voir l’application concernée. Le [guide d’installation](INSTALLATION.md#pour-déboguer) distingue ces deux situations.
+
 Un refus de récupération cloud demande de vérifier la clé privée et le projet Supabase. Une erreur YouTube ne supprime pas les demandes enregistrées. Un manque d’espace exige de libérer de la place avant de réessayer ; le pack et son ZIP occupent de l’espace supplémentaire.
 
 Pour mettre à jour l’application, arrêtez le studio, extrayez la nouvelle archive dans un nouveau dossier, puis ouvrez son `Studio-Fanny.exe`. Vos données personnelles sont séparées du programme ; la mise à jour ne supprime pas les propositions du site public.

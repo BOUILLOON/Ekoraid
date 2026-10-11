@@ -222,7 +222,7 @@ def _public(item: dict) -> dict:
 def _proposals(conn, guest_id: str | None = None) -> list[dict]:
     return [dict(row, mine=bool(guest_id and row["guest_id"] == guest_id))
             for row in db.list_proposals(conn, guest_id=guest_id)
-            if row["state"] in _VISIBLE_STATES]
+            if row["state"] in _VISIBLE_STATES and not row.get("withdrawn_at")]
 
 
 def _same_source(items: list[dict], source_id: int | None) -> dict | None:

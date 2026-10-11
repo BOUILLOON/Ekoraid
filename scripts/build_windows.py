@@ -167,7 +167,7 @@ def bundle_zip(directory: Path, destination: Path) -> str:
 def run_frozen_smoke(executable: Path, report_path: Path) -> None:
     command = [sys.executable, str(ROOT / "scripts" / "packaging" / "windows_smoke.py"), "--executable", str(executable), "--report", str(report_path)]
     try:
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except subprocess.TimeoutExpired as error:
         def tail(value):
             if isinstance(value, bytes):

@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Tag de livraison (studio-windows-v…)"
         required: true
-        default: studio-windows-v2026.10.11.1
+        default: studio-windows-v2026.10.11.2
         type: string
       publish_release:
         description: Publier le ZIP vérifié dans une release GitHub
@@ -45,7 +45,7 @@ jobs:
       - name: Vérifier les tests de distribution
         shell: pwsh
         run: |
-          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py tests/test_windows_smoke_diagnostics.py -q --junitxml=build/windows/pytest.xml
+          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py tests/test_windows_smoke_diagnostics.py tests/test_frozen_streams.py -q --junitxml=build/windows/pytest.xml
           $PlaylistTestExitCode = $LASTEXITCODE
           python scripts/packaging/annotate_pytest.py build/windows/pytest.xml
           exit $PlaylistTestExitCode
@@ -88,7 +88,9 @@ jobs:
           $description = @'
           Application Windows 11 x64 autonome : extraire tout le ZIP puis ouvrir Studio-Fanny.exe. Python, Node.js et FFmpeg sont intégrés.
 
-          La fenêtre, les services privés, la conversion d'un WAV généré localement, le contrôle audio et l'export ZIP/M3U8 ont été testés sur le runner Windows. Aucun morceau YouTube commercial n'a été téléchargé et aucune donnée Supabase n'a été modifiée. Le rapport de vérification et le SHA256 accompagnent l'archive.
+          Correction de WinError 6 au démarrage sans console. Deux lancements Windows avec les trois handles standards NULL vérifient le formulaire du premier démarrage puis une installation configurée : ouverture des services et fermeture propre sans perte de données.
+
+          La fenêtre, les services privés, la conversion d'un WAV généré localement, le contrôle audio et l'export ZIP/M3U8 ont également été testés sur le runner Windows. Aucun morceau YouTube commercial n'a été téléchargé et aucune donnée Supabase n'a été modifiée. Le rapport de vérification et le SHA256 accompagnent l'archive. L'application n'est pas signée par un éditeur ; l'avertissement Windows lié à cette absence de signature peut subsister.
           '@
           [IO.File]::WriteAllText('dist/windows/release-notes.txt', $description, [Text.UTF8Encoding]::new($false))
           gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY *> $null

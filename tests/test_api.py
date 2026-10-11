@@ -5,6 +5,8 @@ import io
 from pathlib import Path
 import shutil
 import subprocess
+import threading
+import wave
 
 import pytest
 from fastapi.testclient import TestClient
@@ -232,6 +234,116 @@ def test_known_youtube_duration_fills_unknown_source_without_overwriting_title_o
     assert repeated.json()['duplicate']['duration']==123.5 and repeated.json()['duplicate']['channel']=='Chaîne connue'
     for duration in (-1,0,'123',True,'NaN'):
         assert alice.post('/api/proposals',json={**payload,'duration':duration},headers=headers).status_code==422
+
+
+@pytest.mark.parametrize('kind',['youtube','playlist'])
+def test_two_guests_racing_same_canonical_source_create_only_one_active_proposal(cfg,monkeypatch,kind):
+    import playlist25.guest as guest_module
+    alice,alice_headers,_=guest(cfg,'Même pseudo')
+    bob,bob_headers,_=guest(cfg,'Même pseudo')
+    with db.connect(cfg) as conn: db.set_setting(conn,'offline_mode',True)
+    barrier=threading.Barrier(2)
+    seen=threading.local()
+    original=guest_module._same_source
+    def synchronize_first_read(items,source_id):
+        # Force both requests to observe no source before either takes its writer lock.
+        if source_id is None and not getattr(seen,'used',False):
+            seen.used=True
+            barrier.wait(timeout=5)
+        return original(items,source_id)
+    monkeypatch.setattr(guest_module,'_same_source',synchronize_first_read)
+    links=(['https://youtu.be/BaW_jenozKc?t=30','https://www.youtube.com/watch?v=BaW_jenozKc&feature=share']
+           if kind=='youtube' else ['https://music.youtube.com/playlist?list=PL1234567890abc&index=2','http://m.youtube.com/playlist?list=PL1234567890abc&feature=share'])
+    calls=[(alice,alice_headers,links[0]),(bob,bob_headers,links[1])]
+    def propose(call):
+        client,headers,url=call
+        return client.post('/api/proposals',json={'kind':'youtube','url':url},headers=headers)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses=list(pool.map(propose,calls))
+    assert all(response.status_code==200 for response in responses),[response.text for response in responses]
+    bodies=[response.json() for response in responses]
+    assert sum('item' in body for body in bodies)==1
+    assert sum('duplicate' in body for body in bodies)==1
+    created=next(body['item'] for body in bodies if 'item' in body)
+    duplicate=next(body['duplicate'] for body in bodies if 'duplicate' in body)
+    assert duplicate['id']==created['id'] and duplicate['source_id']==created['source_id']
+    assert created['mine'] is True and duplicate['mine'] is False
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==1
+        assert conn.execute('SELECT COUNT(*) FROM proposals WHERE withdrawn_at IS NULL').fetchone()[0]==1
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==0
+
+
+@pytest.mark.parametrize('status',['queued','downloading','available'])
+def test_duplicate_of_prepared_source_preserves_queue_files_and_withdrawal_allows_readd(cfg,status):
+    from playlist25 import queue
+    alice,alice_headers,_=guest(cfg,'Même pseudo')
+    bob,bob_headers,_=guest(cfg,'Même pseudo')
+    with db.connect(cfg) as conn: db.set_setting(conn,'offline_mode',True)
+    payload={'kind':'youtube','url':'https://youtu.be/BaW_jenozKc'}
+    created=alice.post('/api/proposals',json=payload,headers=alice_headers).json()['item']
+    assert alice.post(f"/api/proposals/{created['id']}/vote",json={'active':True},headers=alice_headers).status_code==200
+    audio=None
+    with db.connect(cfg) as conn:
+        conn.execute("UPDATE proposals SET state='approved' WHERE id=?",(created['id'],))
+        assert queue.enqueue_sources(conn,cfg,[created['source_id']])['queued']==[created['source_id']]
+        job_id=conn.execute('SELECT id FROM jobs WHERE source_id=?',(created['source_id'],)).fetchone()[0]
+        if status=='available':
+            audio=cfg.audio_dir/'already-prepared.wav'
+            with wave.open(str(audio),'wb') as wav:
+                wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(8000);wav.writeframes(b'\x00\x00'*8000)
+            conn.execute('UPDATE sources SET file_path=?,duration=1 WHERE id=?',(audio.name,created['source_id']))
+        queue.set_job_state(conn,job_id,status,progress=100 if status=='available' else 0)
+        before_job=dict(conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone())
+        before_events=[dict(row) for row in conn.execute('SELECT * FROM job_events')]
+        before_audio=audio.read_bytes() if audio else None
+    response=bob.post('/api/proposals',json={**payload,'url':'https://www.youtube.com/watch?v=BaW_jenozKc&feature=share'},headers=bob_headers)
+    assert response.status_code==200,response.text
+    duplicate=response.json()['duplicate']
+    assert duplicate['id']==created['id'] and duplicate['status']==status and duplicate['mine'] is False
+    assert duplicate['votes']==1 and 'file_path' not in duplicate
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM proposals').fetchone()[0]==1
+    assert alice.post(f"/api/proposals/{created['id']}/withdraw",json={},headers=alice_headers).status_code==200
+    replacement=bob.post('/api/proposals',json=payload,headers=bob_headers)
+    assert replacement.status_code==200,replacement.text
+    new=replacement.json()['item']
+    assert new['id']!=created['id'] and new['source_id']==created['source_id'] and new['status']==status
+    assert new['mine'] is True and new['votes']==0
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==1
+        assert conn.execute('SELECT COUNT(*) FROM proposals').fetchone()[0]==2
+        assert conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
+        assert dict(conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone())==before_job
+        assert [dict(row) for row in conn.execute('SELECT * FROM job_events')]==before_events
+        assert conn.execute('SELECT COUNT(*) FROM votes WHERE proposal_id=?',(created['id'],)).fetchone()[0]==1
+    if audio: assert audio.read_bytes()==before_audio
+
+
+def test_withdrawal_audit_marker_excludes_stale_visible_state_from_listing_and_duplicates(cfg):
+    alice,headers,_=guest(cfg)
+    with db.connect(cfg) as conn: db.set_setting(conn,'offline_mode',True)
+    payload={'kind':'youtube','url':'https://youtu.be/BaW_jenozKc'}
+    old=alice.post('/api/proposals',json=payload,headers=headers).json()['item']
+    assert alice.post(f"/api/proposals/{old['id']}/withdraw",json={},headers=headers).status_code==200
+    with db.connect(cfg) as conn:
+        withdrawn_at=conn.execute('SELECT withdrawn_at FROM proposals WHERE id=?',(old['id'],)).fetchone()[0]
+        conn.execute("UPDATE proposals SET state='approved' WHERE id=?",(old['id'],))
+    assert alice.get('/api/proposals').json()['items']==[]
+    readded=alice.post('/api/proposals',json=payload,headers=headers)
+    assert readded.status_code==200 and 'item' in readded.json(),readded.text
+    assert readded.json()['item']['id']!=old['id'] and readded.json()['item']['source_id']==old['source_id']
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT withdrawn_at FROM proposals WHERE id=?',(old['id'],)).fetchone()[0]==withdrawn_at
+
+
+def test_same_title_different_youtube_recordings_are_not_exact_duplicates(cfg):
+    alice,headers,_=guest(cfg)
+    with db.connect(cfg) as conn: db.set_setting(conn,'offline_mode',True)
+    first=alice.post('/api/proposals',json={'kind':'youtube','url':'https://youtu.be/raceVer_001','title':'Même titre'},headers=headers).json()['item']
+    other=alice.post('/api/proposals',json={'kind':'youtube','url':'https://youtu.be/raceVer_002','title':'Même titre'},headers=headers)
+    assert other.status_code==200 and 'duplicate' not in other.json(),other.text
+    assert other.json()['item']['source_id']!=first['source_id']
 
 
 def test_links_canonical_duplicates_and_real_search_provider_contract(cfg,monkeypatch):

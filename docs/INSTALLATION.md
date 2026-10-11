@@ -236,7 +236,10 @@ Le checkout est monté dans `/app` pour conserver `.env.local` et `data/` lorsqu
 
 ## Pour déboguer
 
-Dans la version autonome, commencez par **Réglages & diagnostics → Vérifier les prérequis**. Pour changer la connexion privée ou retrouver l’accès, cliquez sur **Arrêter le studio**, puis **Configurer la connexion** ou **Changer mon mot de passe** dans la fenêtre de l’application. **Ouvrir le studio** permet de rouvrir le navigateur.
+Si la fenêtre du studio s’ouvre, utilisez **Réglages & diagnostics → Vérifier les prérequis**. Pour changer la connexion privée ou retrouver l’accès, cliquez sur **Arrêter le studio**, puis **Configurer la connexion** ou **Changer mon mot de passe** dans la fenêtre de l’application. **Ouvrir le studio** permet de rouvrir le navigateur.
+
+- **Une erreur contenant `[WinError 6]` apparaît avant la fenêtre du studio** : c’est une erreur du lanceur. Utilisez une [release officielle](https://github.com/BOUILLOON/Ekoraid/releases) dont les notes confirment le lancement par double-clic **sans console**. Extrayez son ZIP dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et votre ancienne installation ; vous n’avez pas à refaire votre connexion Supabase ni à remplacer `.env.local`.
+- **Windows affiche « Windows a protégé votre ordinateur » ou « Éditeur inconnu »** : c’est un avertissement SmartScreen pour une application sans signature d’éditeur, distinct de l’erreur ci-dessus. Vérifiez que le ZIP provient des [Releases officielles](https://github.com/BOUILLOON/Ekoraid/releases). **Informations complémentaires** permet d’inspecter l’application concernée avant de choisir les options proposées par Windows.
 
 Les commandes suivantes concernent uniquement la version source :
 

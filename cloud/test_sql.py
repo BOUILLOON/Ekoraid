@@ -307,7 +307,49 @@ def main():
         assert avatars([second['id']])['items'][0]['avatar_data']==avatar_b
         assert sql(f"select duration from public.playlist25_sources where id={metadata_video['source_id']};")=='180.25'
         assert sql(f"select state from public.playlist25_proposals where id={playlist['id']};")=='archived'
-        print("PASS: PostgreSQL reusable migration, owner photos/bounded PNG/public batches, canonical public playlists/re-add, finite durations/preservation, unlimited history beyond 20000, concurrency/rate protection, RLS, invitations, admin publication/merge and withdrawal history.")
+
+        # Separate identities with the same nickname must share one active exact
+        # source, even when two independent database sessions propose together.
+        race_tokens = ("2" * 64, "3" * 64)
+        race_guests = [rpc("playlist25_identity", token, "Même pseudo", None) for token in race_tokens]
+        assert race_guests[0]["id"] != race_guests[1]["id"]
+        race_video = None
+        for kind, video_id, playlist_id in (("youtube", "raceDup_001", None), ("playlist", None, "PLRaceDup0001abc")):
+            def add_same_source(token):
+                return rpc("playlist25_propose", token, kind, "Ajout simultané", "", video_id, playlist_id, None, "")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                simultaneous = list(pool.map(add_same_source, race_tokens))
+            created = [result["item"] for result in simultaneous if "item" in result]
+            duplicates = [result["duplicate"] for result in simultaneous if "duplicate" in result]
+            assert len(created) == len(duplicates) == 1, "Concurrent exact sources created two active proposals"
+            original, repeated = created[0], duplicates[0]
+            assert original["id"] == repeated["id"] and original["source_id"] == repeated["source_id"]
+            assert original["mine"] is True and repeated["mine"] is False, "Nickname must not confer ownership of a duplicate"
+            assert sql(f"select count(*) from public.playlist25_sources where id={original['source_id']};") == "1"
+            assert sql(f"select count(*) from public.playlist25_proposals where source_id={original['source_id']} and withdrawn_at is null;") == "1"
+            if kind == "youtube":
+                winner_index = next(index for index, result in enumerate(simultaneous) if "item" in result)
+                race_video = original, race_tokens[winner_index], race_tokens[1 - winner_index]
+
+        assert race_video is not None
+        original, owner_token, other_token = race_video
+        assert rpc("playlist25_propose", owner_token, "youtube", "Autre titre", "", "raceDup_001")["duplicate"]["mine"] is True
+        assert rpc("playlist25_vote", other_token, original["id"], True)["votes"] == 1
+        assert rpc("playlist25_withdraw", owner_token, original["id"])["withdrawn"] is True
+        withdrawal_time = sql(f"select withdrawn_at from public.playlist25_proposals where id={original['id']};")
+        # A stale visible state cannot override the permanent withdrawal marker.
+        sql(f"update public.playlist25_proposals set state='approved' where id={original['id']};")
+        assert all(row["id"] != original["id"] for row in rpc("playlist25_list", other_token, "Ajout simultané", "recent", False)["items"])
+        replacement = rpc("playlist25_propose", other_token, "youtube", "Ajout simultané", "", "raceDup_001")["item"]
+        assert replacement["id"] != original["id"] and replacement["source_id"] == original["source_id"] and replacement["votes"] == 0
+        assert replacement["mine"] is True
+        assert sql(f"select withdrawn_at from public.playlist25_proposals where id={original['id']};") == withdrawal_time
+        assert sql(f"select count(*) from public.playlist25_votes where proposal_id={original['id']};") == "1"
+        assert rpc("playlist25_propose", owner_token, "youtube", "Encore ce lien", "", "raceDup_001")["duplicate"]["mine"] is False
+        distinct_recordings = [rpc("playlist25_propose", owner_token, "youtube", "Même titre de vidéo", "", video_id)["item"]
+                               for video_id in ("raceVer_001", "raceVer_002")]
+        assert distinct_recordings[0]["source_id"] != distinct_recordings[1]["source_id"], "Different recordings must not collapse on their title"
+        print("PASS: PostgreSQL reusable migration, owner photos/bounded PNG/public batches, canonical playlists/re-add, finite durations/preservation, unlimited history beyond 20000, atomic global duplicates/ownership, distinct recordings, concurrency/rate protection, RLS, invitations, admin publication/merge and withdrawal history.")
     finally:
         subprocess.run(["docker", "stop", "-t", "1", name], capture_output=True)
 

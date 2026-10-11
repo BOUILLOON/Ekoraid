@@ -32,32 +32,75 @@ def prepare_runtime():
         os.environ["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")
 
 
-def restore_streams():
-    # A PyInstaller windowed build sets these to None even with redirected pipes.
-    # Reattach inherited Windows handles for service logs and the build smoke test.
-    for name, number, handle_id, mode in (("stdout", 1, -11, "w"), ("stderr", 2, -12, "w"), ("stdin", 0, -10, "r")):
-        if getattr(sys, name) is not None:
-            continue
+def _windows_standard_descriptor(handle_id, mode):
+    """Own a duplicate of a usable inherited Win32 handle, never the original."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.GetFileType.restype = wintypes.DWORD
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.DuplicateHandle.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.DuplicateHandle.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel.GetStdHandle(handle_id)
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        return None
+    # Explorer normally supplies no console handles. A numeric CRT descriptor
+    # can still exist, so validate the actual handle before making a stream.
+    if (kernel.GetFileType(handle) & 0x7FFF) not in (1, 2, 3):  # disk, character, pipe
+        return None
+    process = kernel.GetCurrentProcess()
+    duplicate = wintypes.HANDLE()
+    if not kernel.DuplicateHandle(process, handle, process, ctypes.byref(duplicate), 0, False, 2):  # DUPLICATE_SAME_ACCESS
+        return None
+    try:
+        flags = (os.O_RDONLY if mode == "r" else os.O_WRONLY) | getattr(os, "O_BINARY", 0)
+        # open_osfhandle takes ownership, hence the explicit duplicate above.
+        return msvcrt.open_osfhandle(duplicate.value, flags)
+    except (OSError, ValueError):
+        kernel.CloseHandle(duplicate.value)
+        return None
+
+
+def _standard_descriptor(number, handle_id, mode):
+    if os.name == "nt":
+        return _windows_standard_descriptor(handle_id, mode)
+    try:
+        return os.dup(number)
+    except OSError:
+        return None
+
+
+def _restored_stream(number, handle_id, mode):
+    descriptor = _standard_descriptor(number, handle_id, mode)
+    if descriptor is not None:
         try:
-            descriptor = os.dup(number)
-        except OSError:
-            descriptor = None
-            if os.name == "nt":
-                import ctypes
-                import msvcrt
-                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-                kernel.GetStdHandle.restype = ctypes.c_void_p
-                handle = kernel.GetStdHandle(handle_id)
-                if handle not in (None, 0, ctypes.c_void_p(-1).value):
-                    try:
-                        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY if mode == "r" else os.O_WRONLY)
-                    except OSError:
-                        pass
-        if descriptor is None:
-            stream = open(os.devnull, mode, encoding="utf-8")
-        else:
-            stream = os.fdopen(descriptor, mode, encoding="utf-8", errors="replace", buffering=1)
-        setattr(sys, name, stream)
+            os.fstat(descriptor)
+            return os.fdopen(descriptor, mode, encoding="utf-8", errors="replace", buffering=1)
+        except (OSError, ValueError):
+            # Only descriptors/handles owned by this helper are closed. A
+            # rejected CRT stream must not prevent the desktop from opening.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return open(os.devnull, mode, encoding="utf-8", errors="replace")
+
+
+def restore_streams():
+    # Windowed PyInstaller clears sys.std* even when pipes were supplied. Keep
+    # valid redirected logs; Explorer launches get independent NUL streams.
+    for name, number, handle_id, mode in (("stdout", 1, -11, "w"), ("stderr", 2, -12, "w"), ("stdin", 0, -10, "r")):
+        if getattr(sys, name) is None:
+            setattr(sys, name, _restored_stream(number, handle_id, mode))
 
 
 def main():
