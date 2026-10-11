@@ -1,0 +1,17 @@
+services:
+  playlist:
+    build: .
+    # Linux only. Admin stays bound to the host's 127.0.0.1:8001.
+    network_mode: host
+    user: "${PLAYLIST_UID:-1000}:${PLAYLIST_GID:-1000}"
+    init: true
+    stop_grace_period: 25s
+    volumes:
+      # Keep generated .env.local and data across container recreation.
+      # The HTTP apps serve only their explicit static directories/routes.
+      - .:/app
+    environment:
+      DATA_DIR: /app/data
+      ADMIN_HOST: 127.0.0.1
+      GUEST_HOST: 0.0.0.0
+    restart: unless-stopped

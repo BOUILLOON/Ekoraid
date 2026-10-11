@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#3934a7">
+  <title>La playlist des 25 ans</title>
+  <link rel="icon" href="./static/placeholder.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./static/styles.css">
+  <script defer src="./static/cloud-config.js"></script>
+  <script defer src="./static/cloud.js"></script>
+  <script defer src="./static/guest.js"></script>
+</head>
+<body class="guest-page">
+  <a class="skip-link" href="#propositions">Aller aux morceaux</a>
+  <header class="topbar shell">
+    <a class="brand" href="#"><span class="brand-icon" aria-hidden="true">♪</span><span>la playlist<span class="brand-sub">des 25 ans</span></span></a>
+    <div class="topbar-right"><span class="live-pill" id="connection-label"><span></span> Ensemble, on prépare la soirée</span><button class="identity-button" id="identity-button" type="button"><span class="avatar" id="guest-avatar">?</span><span id="guest-name">Choisir mon pseudo</span></button></div>
+  </header>
+  <main class="shell">
+    <div class="notice hidden" id="global-notice" role="status"></div>
+    <section class="guest-hero" aria-labelledby="event-title">
+      <div class="hero-copy"><span class="eyebrow"><span class="little-star" aria-hidden="true">✦</span> La bande-son, c’est vous</span><h1 id="event-title">La playlist<br>des <span>25 ans.</span></h1><p>Le morceau qui vous fait danser, le classique qu’on chante trop fort… Ajoutez vos favoris et votez pour ceux des autres.</p><a class="button primary" href="#ajouter">Ajouter ma musique <span aria-hidden="true">→</span></a><div class="hero-footnote"><span aria-hidden="true">♡</span> Un pseudo suffit. Les bonnes idées restent.</div></div>
+      <div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="record"><div class="record-label"><span>PLAYLIST</span><strong>25</strong><span>ANS • ENSEMBLE</span></div></div><span class="floating-note note-one">♫</span><span class="floating-note note-two">✦</span><div class="art-sticker">QUE DES<br><strong>BONS SONS.</strong></div><div class="small-sticker">À VOUS<br>DE JOUER →</div></div>
+    </section>
+    <section class="stat-strip" aria-label="La playlist en chiffres"><div><strong id="stat-tracks">—</strong><span>morceaux proposés</span></div><div><strong id="stat-votes">—</strong><span>votes pour la soirée</span></div><div><strong id="stat-mine">—</strong><span>mes propositions</span></div><p><span aria-hidden="true">✦</span> Toutes les idées ont leur place.</p></section>
+    <section class="add-section" id="ajouter" aria-labelledby="add-heading">
+      <div class="section-heading"><div><span class="eyebrow">01 / À vous de jouer</span><h2 id="add-heading">Un morceau en tête ?</h2><p>Choisissez comment l’ajouter à notre playlist.</p></div><span class="quota-pill" id="quota-label">10 idées par invité</span></div>
+      <div class="add-panel">
+        <div class="entry-tabs" role="tablist" aria-label="Ajouter une proposition">
+          <button type="button" class="entry-tab active" role="tab" id="tab-search" aria-selected="true" aria-controls="search-form" data-entry="search"><span aria-hidden="true">⌕</span> Chercher une musique</button>
+          <button type="button" class="entry-tab" role="tab" id="tab-link" aria-selected="false" aria-controls="link-form" data-entry="link"><span aria-hidden="true">→</span> Coller un lien YouTube</button>
+          <button type="button" class="entry-tab" role="tab" id="tab-manual" aria-selected="false" aria-controls="manual-form" data-entry="manual"><span aria-hidden="true">♫</span> Proposer un titre</button>
+        </div>
+        <div class="entry-body">
+          <form id="search-form" class="entry-form" role="tabpanel" aria-labelledby="tab-search">
+            <label for="search-input">Écrivez un artiste ou une chanson</label><div class="input-action"><span class="input-icon" aria-hidden="true">⌕</span><input id="search-input" type="search" placeholder="Par exemple : Dalida, ABBA, Les lacs du Connemara…" maxlength="120" required autocomplete="off"><button class="button primary" type="submit">Rechercher <span aria-hidden="true">→</span></button></div><p class="field-help" id="search-help">Les propositions apparaissent pendant que vous écrivez. Cliquez sur « Ajouter » à côté du morceau qui vous plaît.</p>
+          </form>
+          <form id="link-form" class="entry-form hidden" role="tabpanel" aria-labelledby="tab-link">
+            <label for="link-input">Le lien de votre morceau</label><div class="input-action"><input id="link-input" type="url" placeholder="https://www.youtube.com/watch?v=…" maxlength="2048" required><button class="button primary" type="submit">Ajouter le morceau <span aria-hidden="true">＋</span></button></div><p class="field-help">Un morceau par proposition. Les playlists complètes se préparent dans l’administration.</p>
+          </form>
+          <form id="manual-form" class="entry-form hidden" role="tabpanel" aria-labelledby="tab-manual">
+            <div class="manual-grid"><div class="field"><label for="manual-title">Titre du morceau <span>*</span></label><input id="manual-title" placeholder="Le morceau qui met tout le monde d’accord" maxlength="200" required></div><div class="field"><label for="manual-artist">Artiste <span class="muted">(si vous le connaissez)</span></label><input id="manual-artist" placeholder="Le nom de l’artiste" maxlength="150"></div><button class="button primary" type="submit">Ajouter mon idée <span aria-hidden="true">＋</span></button></div><p class="field-help">Pas besoin de lien. Votre idée sera enregistrée pour être retrouvée avant la soirée.</p>
+          </form>
+          <div id="entry-feedback" role="status"></div><div id="search-results" class="search-results"></div>
+        </div>
+      </div>
+    </section>
+    <section class="catalogue-section" id="propositions" aria-labelledby="catalogue-heading">
+      <div class="section-heading"><div><span class="eyebrow">02 / Nos futurs classiques</span><h2 id="catalogue-heading">La playlist se construit ici<span class="heading-dot">.</span></h2><p>Une bonne idée ? Un petit cœur pour lui donner sa chance.</p></div><button type="button" class="button subtle small" id="refresh-proposals">Actualiser <span aria-hidden="true">↻</span></button></div>
+      <div class="catalogue-toolbar"><div class="filter-tabs" role="group" aria-label="Filtrer les propositions"><button type="button" id="filter-all" class="active">Tous les morceaux <span id="count-all">0</span></button><button type="button" id="filter-mine">Mes propositions <span id="count-mine">0</span></button></div><div class="catalogue-search"><label class="sr-only" for="catalogue-query">Rechercher dans la playlist</label><span aria-hidden="true">⌕</span><input id="catalogue-query" type="search" placeholder="Rechercher dans la playlist…"></div><label class="sort-field"><span class="sr-only">Trier les propositions</span><select id="catalogue-sort"><option value="popular">Les plus aimés</option><option value="recent">Les plus récents</option></select></label></div>
+      <div class="track-grid" id="proposal-list" aria-live="polite"></div><div class="empty-state hidden" id="catalogue-empty"><span aria-hidden="true">♫</span><h3>Le premier morceau, c’est peut-être le vôtre.</h3><p>Ajoutez une idée pour lancer la playlist.</p></div>
+    </section>
+    <aside class="guest-explanation"><div class="explanation-icon" aria-hidden="true">♡</div><div><h3>Une playlist collective, une vraie soirée.</h3><p>Tout le monde voit qui a proposé quoi. Les propositions restent enregistrées ; l’organisation prépare les fichiers pour le jour J. Un vote par morceau et par navigateur : changer de navigateur ou effacer la session peut contourner cette limite.</p></div></aside>
+    <footer class="guest-footer"><a class="brand small-brand" href="#"><span class="brand-icon" aria-hidden="true">♪</span><span>la playlist des 25 ans</span></a><span>Les morceaux passent. Les souvenirs restent.</span><button type="button" class="text-button" id="share-button">Partager le lien →</button></footer>
+  </main>
+  <dialog id="identity-dialog" class="modal identity-modal" aria-labelledby="identity-heading"><form id="identity-form"><button type="button" class="modal-close" data-close-dialog="identity-dialog" aria-label="Fermer">×</button><span class="modal-mark" aria-hidden="true">♫</span><span class="eyebrow">Bienvenue dans la bande</span><h2 id="identity-heading">On vous appelle comment ?</h2><p>Un pseudo pour reconnaître vos idées. Pas d’email, pas de mot de passe.</p><div class="field"><label for="nickname-input">Votre pseudo</label><input id="nickname-input" placeholder="Camille, DJ Papa, la team du fond…" maxlength="40" minlength="2" autocomplete="nickname" required></div><div class="field hidden" id="invitation-field"><label for="invitation-input">Votre code d’invitation</label><input id="invitation-input" maxlength="100" autocomplete="off"></div><div id="identity-feedback" role="status"></div><button class="button primary full-width" type="submit">C’est parti <span aria-hidden="true">→</span></button><p class="field-help">Votre pseudo reste enregistré dans ce navigateur.</p></form></dialog>
+  <dialog id="share-dialog" class="modal" aria-labelledby="share-heading"><button type="button" class="modal-close" data-close-dialog="share-dialog" aria-label="Fermer">×</button><span class="eyebrow">Plus on est de fous</span><h2 id="share-heading">Invitez la bande.</h2><p>Envoyez ce lien pour ajouter des idées à la playlist.</p><input id="share-url" readonly aria-label="Lien de partage"><button id="copy-share" type="button" class="button primary full-width">Copier le lien</button><div id="share-feedback" role="status"></div><img id="share-qr" class="qr-image hidden" alt="QR code du lien public"></dialog>
+  <div class="toast-container" id="toasts" aria-live="polite"></div>
+</body>
+</html>

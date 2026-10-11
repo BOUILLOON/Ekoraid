@@ -1,0 +1,6 @@
+project_id = "playlist25"
+
+# Clé publishable compatible : pas de JWT obligatoire.
+# L’Edge Function utilise une RPC anon avec quotas; aucun rôle privilégié.
+[functions.music-search]
+verify_jwt = false
