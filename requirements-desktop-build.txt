@@ -1,0 +1,2 @@
+# Isolated build tools. Runtime dependencies stay in requirements.txt.
+pyinstaller==6.22.3

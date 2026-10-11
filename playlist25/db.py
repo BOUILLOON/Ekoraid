@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from .config import Settings
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS guests(id TEXT PRIMARY KEY,nickname TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS guests(id TEXT PRIMARY KEY,nickname TEXT NOT NULL,created_at TEXT NOT NULL,avatar_data TEXT NOT NULL DEFAULT '',avatar_version TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS invitations(code_hash TEXT PRIMARY KEY,guest_id TEXT UNIQUE REFERENCES guests(id),created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY,video_id TEXT UNIQUE,url TEXT,title TEXT NOT NULL,artist TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',duration REAL,thumbnail TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',file_path TEXT,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS proposals(id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL REFERENCES sources(id),guest_id TEXT REFERENCES guests(id),state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','rejected','archived')),sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,withdrawn_at TEXT);
@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY,directory TEXT NOT NULL,a
 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY,export_id TEXT NOT NULL REFERENCES exports(id),token_hash TEXT NOT NULL UNIQUE,host TEXT NOT NULL,archive_relative TEXT NOT NULL,size INTEGER NOT NULL,mtime_ns INTEGER NOT NULL,device INTEGER NOT NULL,inode INTEGER NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS cloud_map(kind TEXT NOT NULL,remote_id TEXT NOT NULL,local_id TEXT NOT NULL,PRIMARY KEY(kind,remote_id));
 CREATE INDEX IF NOT EXISTS proposals_state_idx ON proposals(state);
+CREATE INDEX IF NOT EXISTS proposals_source_idx ON proposals(source_id);
 CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(status);
+CREATE INDEX IF NOT EXISTS job_events_job_idx ON job_events(job_id,id);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -79,6 +81,10 @@ def init_db(cfg: Settings):
         _migrate_withdrawals(conn)
         conn.executescript(SCHEMA)
         with conn:
+            guest_columns = {row['name'] for row in conn.execute('PRAGMA table_info(guests)')}
+            for name in ('avatar_data', 'avatar_version'):
+                if name not in guest_columns:
+                    conn.execute(f"ALTER TABLE guests ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS proposals_owner_source_live_idx ON proposals(source_id,guest_id) WHERE withdrawn_at IS NULL")
             defaults = {"event_name":cfg.event_name,"proposals_open":True,"votes_open":True,"offline_mode":False,"invitation_required":False,"public_url":cfg.public_url,"local_url":cfg.local_url,"max_proposals":cfg.max_proposals,"max_playlist_items":cfg.max_playlist_items,"output_format":cfg.output_format,"queue_paused":False}
             for key, value in defaults.items():
@@ -86,6 +92,13 @@ def init_db(cfg: Settings):
             if cfg.event_name == "Les 25 ans de Fanny":
                 conn.execute("UPDATE settings SET value=? WHERE key='event_name' AND value=?",
                              (json.dumps(cfg.event_name,ensure_ascii=False),json.dumps("La playlist des 25 ans")))
+            # Upgrade the previous out-of-the-box quantity limits. Existing
+            # proposals, votes and audio are untouched; explicit custom limits
+            # remain editable in the studio.
+            for key, previous in (("max_proposals", 10), ("max_playlist_items", 500)):
+                if getattr(cfg, key) == 0:
+                    conn.execute("UPDATE settings SET value='0' WHERE key=? AND value=?",
+                                 (key, str(previous)))
 
 def get_setting(conn, key, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone()
@@ -108,6 +121,7 @@ def upsert_source(conn, entry):
 
 def list_proposals(conn, guest_id=None, include_hidden=False):
     query = """SELECT p.id,p.source_id,p.guest_id,p.state,p.sort_order,p.created_at,p.withdrawn_at,
+       g.id AS avatar_id,COALESCE(g.avatar_version,'') AS avatar_version,
        COALESCE(g.nickname,'Administration') AS nickname,s.video_id,s.url,s.title,s.artist,s.channel,s.duration,s.thumbnail,s.status,s.file_path,
        (SELECT count(*) FROM votes v WHERE v.proposal_id=p.id) AS votes,
        EXISTS(SELECT 1 FROM votes v WHERE v.proposal_id=p.id AND v.guest_id=?) AS voted

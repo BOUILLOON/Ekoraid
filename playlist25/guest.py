@@ -1,6 +1,8 @@
 """Public collection surface: proposals and votes, never downloads or files."""
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import io
 import math
@@ -12,13 +14,14 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import db, providers
 from .security import csrf_token, install_session, rate_limit, require_csrf
@@ -44,11 +47,15 @@ class VoteInput(_Input):
     active: StrictBool
 
 
+class ProfileInput(_Input):
+    avatar: StrictStr = Field(max_length=200000)
+
+
 _VISIBLE_STATES = {"pending", "approved"}
 _PUBLIC_FIELDS = (
     "id", "source_id", "nickname", "state", "sort_order", "title", "artist",
     "channel", "duration", "thumbnail", "url", "video_id", "status", "votes",
-    "voted", "created_at", "mine",
+    "voted", "created_at", "mine", "avatar_id", "avatar_version",
 )
 _EXTERNAL_SLOTS = threading.BoundedSemaphore(4)
 
@@ -148,12 +155,43 @@ def _settings(conn, cfg) -> dict:
 
 def _guest(conn, request: Request, *, required: bool = True) -> dict | None:
     guest_id = request.session.get("guest_id")
-    row = conn.execute("SELECT id,nickname FROM guests WHERE id=?", (guest_id,)).fetchone()
+    row = conn.execute("SELECT id,nickname,id AS avatar_id,avatar_version FROM guests WHERE id=?", (guest_id,)).fetchone()
     if row:
         return dict(row)
     if required:
         raise HTTPException(401, "Choisis d’abord un pseudo pour participer.")
     return None
+
+
+def _avatar(value: str) -> tuple[str, str]:
+    """Decode only a bounded PNG, then save fresh pixels without source metadata."""
+    if value == "":
+        return "", ""
+    prefix = "data:image/png;base64,"
+    if not value.startswith(prefix):
+        raise HTTPException(400, "Utilise une photo PNG préparée par le sélecteur de profil.")
+    encoded = value[len(prefix):]
+    if not encoded or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded):
+        raise HTTPException(400, "Cette photo PNG n’est pas valide.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if not raw or len(raw) > 150000 or base64.b64encode(raw).decode("ascii") != encoded:
+            raise ValueError("Invalid PNG payload")
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format != "PNG" or not (1 <= image.width <= 128 and 1 <= image.height <= 128) or getattr(image, "n_frames", 1) != 1:
+                raise ValueError("Invalid PNG dimensions or animation")
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            pixels = ImageOps.fit(image.convert("RGBA"), (128, 128), method=Image.Resampling.LANCZOS)
+            normalized = Image.new("RGBA", (128, 128))
+            normalized.paste(pixels)
+            output = io.BytesIO()
+            normalized.save(output, format="PNG")
+            data = output.getvalue()
+    except (binascii.Error, ValueError, OSError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as error:
+        raise HTTPException(400, "Cette photo PNG n’est pas valide. Choisis une autre image.") from error
+    return prefix + base64.b64encode(data).decode("ascii"), hashlib.md5(data, usedforsecurity=False).hexdigest()
 
 
 def _participation(conn, request: Request) -> dict:
@@ -296,7 +334,49 @@ def create_guest_app(cfg) -> FastAPI:
                              (guest_id, invitation["code_hash"]))
             conn.commit()
         request.session["guest_id"] = guest_id
-        return {"guest": {"id": guest_id, "nickname": nickname}}
+        return {"guest": {"id": guest_id, "nickname": nickname, "avatar_id": guest_id,
+                          "avatar_version": current["avatar_version"] if current else ""}}
+
+    @app.post("/api/profile")
+    def profile(payload: ProfileInput, request: Request):
+        require_csrf(request)
+        rate_limit(request, "profile", 15)
+        with _connection(cfg) as conn:
+            guest = _guest(conn, request)
+        avatar_data, version = _avatar(payload.avatar)
+        with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            guest = _guest(conn, request)
+            conn.execute("UPDATE guests SET avatar_data=?,avatar_version=? WHERE id=?",
+                         (avatar_data, version, guest["id"]))
+            guest["avatar_version"] = version
+        return {"guest": guest}
+
+    @app.get("/api/avatars")
+    def avatars(request: Request, ids: str = Query(default="", max_length=7260)):
+        rate_limit(request, "avatars", 120)
+        parts = ids.split(",") if ids else []
+        if len(parts) > 60:
+            raise HTTPException(400, "Charge au maximum 60 photos à la fois.")
+        try:
+            identifiers = []
+            for value in parts:
+                if re.fullmatch(r"[a-fA-F0-9-]{36}", value):
+                    identifiers.append(str(UUID(value)))
+                elif re.fullmatch(r"cloud:[a-zA-Z0-9_-]{1,60}:[a-fA-F0-9-]{36}", value):
+                    namespace, project, guest_id = value.split(":")
+                    identifiers.append(f"{namespace}:{project}:{UUID(guest_id)}")
+                else:
+                    raise ValueError("Invalid profile identifier")
+            identifiers = list(dict.fromkeys(identifiers))
+        except ValueError as error:
+            raise HTTPException(400, "Un identifiant de profil n’est pas valide.") from error
+        if not identifiers:
+            return {"items": []}
+        with _connection(cfg) as conn:
+            rows = conn.execute("SELECT id,avatar_version AS version,avatar_data FROM guests WHERE id IN ("
+                                + ",".join("?" for _ in identifiers) + ")", identifiers).fetchall()
+        return {"items": [dict(row) for row in rows]}
 
     @app.get("/api/proposals")
     def proposals_list(request: Request, q: str = Query(default="", max_length=120),
@@ -425,15 +505,13 @@ def create_guest_app(cfg) -> FastAPI:
             if duplicate:
                 return {"duplicate": _public(duplicate), "similar": [],
                         "message": "Ce morceau est déjà proposé. Tu peux voter pour lui."}
-            count = conn.execute("SELECT COUNT(*) FROM proposals WHERE guest_id=? AND withdrawn_at IS NULL",
-                                 (guest["id"],)).fetchone()[0]
             maximum = int(settings["max_proposals"])
-            if count >= maximum:
-                raise HTTPException(429, f"Tu as atteint la limite de {maximum} propositions. "
-                                    "Tu peux encore voter pour les morceaux de la liste.")
-            total = conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
-            if total >= int(db.get_setting(conn, "max_total_proposals", 5000)):
-                raise HTTPException(429, "La liste a atteint sa capacité. Contacte l’administrateur.")
+            if maximum > 0:
+                count = conn.execute("SELECT COUNT(*) FROM proposals WHERE guest_id=? AND withdrawn_at IS NULL",
+                                     (guest["id"],)).fetchone()[0]
+                if count >= maximum:
+                    raise HTTPException(429, f"Tu as atteint la limite de {maximum} propositions. "
+                                        "Tu peux encore voter pour les morceaux de la liste.")
             source_id = known["id"] if known else db.upsert_source(conn, entry)
             # Administrator moderation remains effective. A voluntary withdrawal
             # permits a fresh proposal while its archived history and votes survive.

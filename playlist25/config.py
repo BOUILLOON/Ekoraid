@@ -9,7 +9,10 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+# The Windows executable keeps its private configuration and music outside the
+# read-only PyInstaller bundle. The launcher supplies this path before import.
+ROOT = Path(os.environ.get("PLAYLIST25_HOME") or SOURCE_ROOT).expanduser().resolve()
 
 @dataclass
 class Settings:
@@ -25,11 +28,11 @@ class Settings:
     cookie_secure: bool = False
     public_url: str = ""
     local_url: str = "http://127.0.0.1:8000"
-    max_proposals: int = 10
-    max_playlist_items: int = 500
+    max_proposals: int = 0
+    max_playlist_items: int = 0
     max_duration: int = 1800
     max_upload_mb: int = 100
-    max_queue_size: int = 1000
+    max_queue_size: int = 0
     min_free_mb: int = 256
     task_timeout: int = 600
     max_attempts: int = 2
@@ -50,9 +53,12 @@ class Settings:
             raise ValueError("ADMIN_HOST doit rester une adresse de boucle locale. Exposez seulement le service invités.")
         if self.guest_port == self.admin_port:
             raise ValueError("Les ports invités et administrateur doivent être différents.")
-        for name in ("max_proposals", "max_playlist_items", "max_duration", "max_upload_mb", "max_queue_size", "task_timeout", "max_attempts", "search_limit"):
+        for name in ("max_duration", "max_upload_mb", "task_timeout", "max_attempts", "search_limit"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} doit être positif.")
+        for name in ("max_proposals", "max_playlist_items", "max_queue_size"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} doit être positif ou nul (0 signifie illimité).")
         if self.min_free_mb < 0:
             raise ValueError("min_free_mb doit être positif ou nul.")
         if self.output_format not in {"mp3", "source"}:
@@ -81,6 +87,8 @@ class Settings:
 
 def initialize_local_config(root: Path = ROOT) -> Path:
     """Create first-run random credentials privately; never overwrite user configuration."""
+    root = Path(root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
     path = root / ".env.local"
     if not path.exists():
         try:

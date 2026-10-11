@@ -2,7 +2,8 @@
 
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = { session: null, items: [], mine: false, query: "", sort: "popular", identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false };
+  const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false };
+  const PAGE_SIZE = 48;
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
     const node = document.createElement(tag);
@@ -83,7 +84,8 @@
     document.title = `${title === "La playlist des 25 ans" ? "Les 25 ans de Fanny" : title} · La playlist`;
     $("#guest-name").textContent = guest?.nickname || "Choisir mon pseudo";
     $("#guest-avatar").textContent = nicknameInitial(guest?.nickname);
-    $("#quota-label").textContent = `${settings.max_proposals || 10} idées par invité`;
+    const maxProposals = Number(settings.max_proposals ?? 0);
+    $("#quota-label").textContent = maxProposals > 0 ? `${maxProposals} idées par invité` : "Autant d’idées que vous voulez";
     $("#invitation-field").classList.toggle("hidden", !settings.invitation_required);
     $("#invitation-input").required = !!settings.invitation_required;
     let notice = "";
@@ -221,6 +223,14 @@
     const mine = state.items.filter((item) => item.mine === true);
     let items = (state.mine ? mine : state.items).filter((item) => [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)));
     items = items.slice().sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
+    const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+    state.page = Math.min(pages, Math.max(1, state.page));
+    const first = (state.page - 1) * PAGE_SIZE;
+    $("#proposal-pagination").classList.toggle("hidden", items.length <= PAGE_SIZE);
+    $("#proposal-page-label").textContent = `Page ${state.page} sur ${pages}`;
+    $("#proposal-range-label").textContent = `${first + 1}–${Math.min(first + PAGE_SIZE, items.length)} sur ${items.length} morceaux`;
+    $("#proposal-prev").disabled = state.page === 1;
+    $("#proposal-next").disabled = state.page === pages;
     $("#stat-tracks").textContent = state.items.length;
     $("#stat-votes").textContent = state.items.reduce((total, item) => total + Number(item.votes || 0), 0);
     $("#stat-mine").textContent = mine.length;
@@ -228,7 +238,8 @@
     $("#count-mine").textContent = mine.length;
     $("#filter-all").classList.toggle("active", !state.mine); $("#filter-mine").classList.toggle("active", state.mine);
     const list = $("#proposal-list"); list.replaceChildren();
-    items.forEach((item, index) => {
+    items.slice(first, first + PAGE_SIZE).forEach((item, localIndex) => {
+      const index = first + localIndex;
       const card = el("article", "track-card");
       const visual = el("div", `track-art track-art-${index % 4}`); const image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; image.loading = "lazy"; visual.append(image, el("span", "track-number", String(index + 1).padStart(2, "0")));
       const content = el("div", "track-content"); content.append(el("h3", "track-title", item.title || "Titre à retrouver"));
@@ -298,10 +309,11 @@
     if (query.length < 3) { $("#search-results").replaceChildren(); message($("#entry-feedback"), ""); return; }
     state.searchTimer = window.setTimeout(() => searchMusic(query, serial), 800);
   });
-  $("#filter-all").addEventListener("click", () => { state.mine = false; renderProposals(); });
-  $("#filter-mine").addEventListener("click", async () => { if (!await ensureIdentity()) return; state.mine = true; renderProposals(); });
-  $("#catalogue-query").addEventListener("input", (event) => { state.query = event.target.value; renderProposals(); });
-  $("#catalogue-sort").addEventListener("change", (event) => { state.sort = event.target.value; renderProposals(); });
+  $("#filter-all").addEventListener("click", () => { state.mine = false; state.page = 1; renderProposals(); });
+  $("#filter-mine").addEventListener("click", async () => { if (!await ensureIdentity()) return; state.mine = true; state.page = 1; renderProposals(); });
+  $("#catalogue-query").addEventListener("input", (event) => { state.query = event.target.value; state.page = 1; renderProposals(); });
+  $("#catalogue-sort").addEventListener("change", (event) => { state.sort = event.target.value; state.page = 1; renderProposals(); });
+  [["#proposal-prev", -1], ["#proposal-next", 1]].forEach(([selector, direction]) => $(selector).addEventListener("click", () => { state.page += direction; renderProposals(); $("#propositions").scrollIntoView({ block: "start" }); }));
   $("#refresh-proposals").addEventListener("click", async (event) => { event.currentTarget.disabled = true; try { state.session = await api("/api/session"); syncSession(); await loadProposals(); toast("La playlist est à jour."); } catch (error) { toast(error.message); } finally { $("#refresh-proposals").disabled = false; } });
   $("#share-button").addEventListener("click", () => { $("#share-url").value = state.session?.settings?.public_url || window.location.href.split("#")[0]; $("#share-qr").classList.toggle("hidden", !!cloud() || !state.session?.settings?.public_url); if (!cloud() && state.session?.settings?.public_url) $("#share-qr").src = "/api/qr?scope=public"; $("#share-dialog").showModal(); });
   $("#copy-share").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#share-url").value); message($("#share-feedback"), "Lien copié. À vous de le partager !", "success"); } catch { $("#share-url").select(); message($("#share-feedback"), "Sélectionnez et copiez le lien affiché avec votre navigateur."); } });

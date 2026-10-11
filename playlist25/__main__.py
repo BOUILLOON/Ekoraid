@@ -9,8 +9,53 @@ import sys
 import time
 from pathlib import Path
 
-from .config import ROOT, initialize_local_config, load_settings
+from .config import ROOT, SOURCE_ROOT, initialize_local_config, load_settings
 from .db import init_db
+
+
+def service_command(*arguments):
+    """Run a private service through Python or the executable's dispatch entry."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--service", *arguments]
+    return [sys.executable, "-m", "playlist25", *arguments]
+
+
+def _same_path(first, second):
+    return os.path.normcase(str(Path(first).resolve())) == os.path.normcase(str(Path(second).resolve()))
+
+
+def _matches_service(process, record, cfg):
+    """A recycled PID or an unrelated executable must never receive a signal."""
+    if not isinstance(record.get("service"), str):
+        return False
+    service = record["service"].split()
+    if service not in (["serve", "guest"], ["serve", "admin"], ["worker"]):
+        return False
+    try:
+        if abs(process.create_time() - float(record["started"])) >= 0.01:
+            return False
+        if not _same_path(process.exe(), sys.executable):
+            return False
+        if record.get("executable") and not _same_path(record["executable"], sys.executable):
+            return False
+        if record.get("home") and not _same_path(record["home"], cfg.root):
+            return False
+        if record.get("data_dir") and not _same_path(record["data_dir"], cfg.data_dir):
+            return False
+        return process.cmdline()[1:] == service_command(*service)[1:]
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+
+
+def _process_records(path):
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(records, list) or any(not isinstance(item, dict) or not isinstance(item.get("pid"), int)
+                                              or isinstance(item.get("pid"), bool) or item["pid"] <= 0 for item in records):
+            raise ValueError("invalid process records")
+        return records
+    except (ValueError, OSError) as exc:
+        raise RuntimeError("Le registre des processus est invalide. Vérifiez processes.json avant de relancer.") from exc
 
 
 def doctor(cfg):
@@ -33,7 +78,17 @@ def doctor(cfg):
 def _terminate(process):
     import psutil
     try:
-        if os.name == 'nt': process.send_signal(signal.CTRL_BREAK_EVENT)
+        if os.name == 'nt':
+            try:
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            except OSError:
+                # A GUI executable may have no console to receive CTRL_BREAK.
+                # End its own children too, so no yt-dlp subprocess is orphaned.
+                parent=psutil.Process(process.pid)
+                for child in parent.children(recursive=True):
+                    try: child.terminate()
+                    except psutil.NoSuchProcess: pass
+                process.terminate()
         else: process.terminate()
         try: process.wait(timeout=10)
         except (subprocess.TimeoutExpired,psutil.TimeoutExpired):
@@ -52,15 +107,28 @@ def stop(cfg):
     if not pid_file.exists():
         print("Aucun lancement enregistré.")
         return
+    records=_process_records(pid_file)
     (cfg.data_dir / ".stop-requested").touch()
-    records=json.loads(pid_file.read_text(encoding="utf-8"))
+    services=[]
     for item in records:
         try:
             process=psutil.Process(item["pid"])
-            arguments=process.cmdline()
-            if "playlist25" in arguments and abs(process.create_time()-item["started"])<2:
-                _terminate(process)
+            if _matches_service(process,item,cfg):
+                services.append(process)
         except (psutil.NoSuchProcess,psutil.AccessDenied): pass
+    # Let the supervisor notice the marker before falling back to PID cleanup.
+    deadline=time.monotonic()+2
+    while services and time.monotonic()<deadline:
+        remaining=[]
+        for process in services:
+            try:
+                if process.is_running() and process.status()!=psutil.STATUS_ZOMBIE: remaining.append(process)
+            except psutil.NoSuchProcess: pass
+            except psutil.AccessDenied: remaining.append(process)
+        services=remaining
+        if services: time.sleep(0.15)
+    for process in services:
+        _terminate(process)
     pid_file.unlink(missing_ok=True)
     print("Services arrêtés ; données et fichiers audio conservés.")
 
@@ -69,31 +137,37 @@ def start(cfg):
     import psutil
     pid_file=cfg.data_dir / "processes.json"
     if pid_file.exists():
-        for record in json.loads(pid_file.read_text(encoding="utf-8")):
+        for record in _process_records(pid_file):
             try:
                 p=psutil.Process(record["pid"])
-                if "playlist25" in p.cmdline() and abs(p.create_time()-record["started"])<2:
+                if _matches_service(p,record,cfg):
                     raise RuntimeError("Un service est déjà lancé. Utilisez la commande stop avant de relancer.")
             except psutil.NoSuchProcess: pass
+            except psutil.AccessDenied as exc:
+                raise RuntimeError("Impossible de vérifier un service déjà enregistré. Arrêtez son lancement avant de relancer.") from exc
     (cfg.data_dir / ".stop-requested").unlink(missing_ok=True)
     children=[]
     try:
         records=[]
         for command in (("serve","guest"),("serve","admin"),("worker",)):
-            options={"cwd":str(ROOT)}
+            environment=os.environ.copy()
+            environment.update(PLAYLIST25_HOME=str(cfg.root),DATA_DIR=str(cfg.data_dir))
+            options={"cwd":str(cfg.root if getattr(sys,"frozen",False) else SOURCE_ROOT),"env":environment}
             if os.name=="nt": options["creationflags"]=subprocess.CREATE_NEW_PROCESS_GROUP
-            process=subprocess.Popen([sys.executable,"-m","playlist25",*command],**options)
+            process=subprocess.Popen(service_command(*command),**options)
             children.append(process)
-            records.append({"pid":process.pid,"started":psutil.Process(process.pid).create_time(),"service":" ".join(command)})
+            records.append({"pid":process.pid,"started":psutil.Process(process.pid).create_time(),"service":" ".join(command),
+                            "executable":str(Path(sys.executable).resolve()),"home":str(cfg.root),"data_dir":str(cfg.data_dir)})
         pid_file.write_text(json.dumps(records),encoding="utf-8")
         print(f"Invités : http://127.0.0.1:{cfg.guest_port} | Administration privée : http://127.0.0.1:{cfg.admin_port}",flush=True)
         print("Mot de passe dans .env.local, modifiable avec configure-admin. Ctrl+C arrête les services.",flush=True)
         while True:
+            if (cfg.data_dir / ".stop-requested").exists(): return
             for child in children:
                 if child.poll() is not None:
                     if (cfg.data_dir / ".stop-requested").exists(): return
                     raise RuntimeError(f"Un service s’est arrêté (code {child.returncode}). Consultez son message ci-dessus.")
-            time.sleep(0.5)
+            time.sleep(0.15)
     except KeyboardInterrupt:
         pass
     finally:

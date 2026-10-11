@@ -35,7 +35,8 @@ def _existing_valid(source, cfg) -> bool:
 
 def enqueue_sources(conn, cfg, ids, retry: bool = False) -> dict:
     """Reserve each source once. Caller commits; available files never download again."""
-    if not isinstance(ids, (list, tuple)) or len(ids) > int(cfg.max_queue_size):
+    capacity = int(cfg.max_queue_size)
+    if not isinstance(ids, (list, tuple)) or capacity > 0 and len(ids) > capacity:
         raise SourceError("La sélection dépasse la taille maximale de la file.")
     if any(isinstance(i, bool) or not isinstance(i, int) or i < 1 for i in ids):
         raise SourceError("La sélection contient un identifiant invalide.")
@@ -60,7 +61,7 @@ def enqueue_sources(conn, cfg, ids, retry: bool = False) -> dict:
             reason = "Ce morceau est déjà dans la file."
         elif retry and (job is None or job["status"] not in FAILED_STATES):
             reason = "Seuls les éléments en échec peuvent être réessayés."
-        elif count >= int(cfg.max_queue_size):
+        elif capacity > 0 and count >= capacity:
             reason = "La file est pleine."
         elif source["duration"] is not None and source["duration"] > int(cfg.max_duration):
             reason = "La durée dépasse la limite configurée."

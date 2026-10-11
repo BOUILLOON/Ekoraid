@@ -1,9 +1,15 @@
 """Cloud pull + explicit metadata publication. Audio always remains on the PC."""
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import io
 import json
 import math
 import re
+import shutil
+import tempfile
 from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -12,7 +18,7 @@ from uuid import UUID
 
 from . import db
 
-MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+PUBLISH_BATCH_SIZE = 1000
 
 
 class CloudSyncError(ValueError):
@@ -48,7 +54,12 @@ def _rpc(cfg, name, payload):
                       data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
     try:
         with build_opener(_NoRedirect()).open(request, timeout=30) as response:
-            raw = response.read(MAX_SNAPSHOT_BYTES + 1)
+            # Transfer large snapshots to disk in chunks. Collection size is not
+            # limited by an HTTP byte buffer; audio never enters this response.
+            with tempfile.TemporaryFile() as catalogue:
+                shutil.copyfileobj(response, catalogue, length=1024 * 1024)
+                catalogue.seek(0)
+                data = json.load(catalogue)
     except HTTPError as error:
         if error.code in {401, 403}:
             raise CloudSyncError("Supabase refuse la synchronisation. Vérifiez la clé secrète/service_role et les permissions du script SQL.") from None
@@ -57,10 +68,6 @@ def _rpc(cfg, name, payload):
         raise CloudSyncError(f"Supabase n’a pas fourni le catalogue (HTTP {error.code}). Réessayez après avoir vérifié le projet.") from None
     except (URLError, TimeoutError, OSError):
         raise CloudSyncError("Connexion à Supabase impossible. Vérifiez Internet et SUPABASE_URL ; le catalogue local est conservé.") from None
-    if len(raw) > MAX_SNAPSHOT_BYTES:
-        raise CloudSyncError("Le catalogue distant dépasse 64 Mio. Le catalogue local est conservé ; réduisez les limites de collecte.")
-    try:
-        data = json.loads(raw)
     except (ValueError, UnicodeError):
         raise CloudSyncError("Réponse Supabase invalide. Le catalogue local est conservé.") from None
     if isinstance(data, dict) and data.get("error"):
@@ -107,18 +114,49 @@ def _date(value):
         raise CloudSyncError("Date invalide dans le catalogue distant.") from None
 
 
+def _avatar_fields(row):
+    """Older snapshots omit photos; explicit empty photos remove them."""
+    if "avatar_data" not in row:
+        return {}
+    data, version = row["avatar_data"], row.get("avatar_version", "")
+    if not isinstance(data, str) or not isinstance(version, str) or len(data) > 200000:
+        raise CloudSyncError("Photo de profil distante invalide.")
+    if not data:
+        if version:
+            raise CloudSyncError("Version de photo de profil distante incohérente.")
+        return {"avatar_data": "", "avatar_version": ""}
+    prefix = "data:image/png;base64,"
+    if not data.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{32}", version):
+        raise CloudSyncError("Photo de profil distante invalide.")
+    from PIL import Image
+    try:
+        encoded = data[len(prefix):]
+        binary = base64.b64decode(encoded, validate=True)
+        if (base64.b64encode(binary).decode("ascii") != encoded
+                or not binary.startswith(b"\x89PNG\r\n\x1a\n")
+                or hashlib.md5(binary, usedforsecurity=False).hexdigest() != version):
+            raise ValueError
+        with Image.open(io.BytesIO(binary)) as image:
+            if image.format != "PNG" or image.size != (128, 128) or image.mode not in {"RGB", "RGBA"}:
+                raise ValueError
+            image.load()
+    except (ValueError, binascii.Error, OSError, Image.DecompressionBombError):
+        raise CloudSyncError("Photo de profil distante invalide : PNG 128 × 128 attendu.") from None
+    return {"avatar_data": data, "avatar_version": version}
+
+
 def _validate(snapshot):
     if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1:
         raise CloudSyncError("Version de catalogue distante incompatible. Aucun changement local effectué.")
-    for name, maximum in (("guests", 10000), ("sources", 10000), ("proposals", 10000), ("votes", 500000)):
+    for name in ("guests", "sources", "proposals", "votes"):
         rows = snapshot.get(name)
-        if not isinstance(rows, list) or len(rows) > maximum or any(not isinstance(row, dict) for row in rows):
-            raise CloudSyncError("Catalogue distant incomplet ou trop volumineux. Aucun changement local effectué.")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise CloudSyncError("Catalogue distant incomplet. Aucun changement local effectué.")
     guests = []
     for row in snapshot["guests"]:
         guests.append({"id": _guest_identifier(row.get("id")),
                        "nickname": _text(row.get("nickname"), 50, required=True),
-                       "created_at": _date(row.get("created_at"))})
+                       "created_at": _date(row.get("created_at")), **_avatar_fields(row)})
     guest_ids = {g["id"] for g in guests}
     if len(guest_ids) != len(guests):
         raise CloudSyncError("Identités distantes dupliquées.")
@@ -191,6 +229,9 @@ def import_snapshot(cfg, conn, snapshot):
             gid = "cloud:" + project + ":" + row["id"]
             conn.execute("INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET nickname=excluded.nickname",
                          (gid, row["nickname"], row["created_at"]))
+            if "avatar_data" in row:
+                conn.execute("UPDATE guests SET avatar_data=?,avatar_version=? WHERE id=?",
+                             (row["avatar_data"], row["avatar_version"], gid))
             remember("guest", row["id"], gid)
         for row in sources:
             sid = mapped("source", row["id"])
@@ -259,6 +300,25 @@ def pull(cfg, conn):
     return import_snapshot(cfg, conn, fetch_snapshot(cfg))
 
 
+def _publication_batches(updates, size=PUBLISH_BATCH_SIZE):
+    """Keep each merge target in its request, including merges across batches."""
+    targets = {entry["id"]: entry for entry in updates}
+    batch, included = [], set()
+    for entry in updates:
+        target = targets.get(entry.get("merge_into"))
+        needed = ([target] if target and target["id"] not in included else []) + [entry]
+        if batch and len(batch) + len(needed) > size:
+            yield batch
+            batch, included = [], set()
+            needed = ([target] if target else []) + [entry]
+        for item in needed:
+            if item["id"] not in included:
+                batch.append(item)
+                included.add(item["id"])
+    if batch:
+        yield batch
+
+
 def push(cfg, conn):
     """Explicit admin action: publish settings/moderation, never local audio."""
     if db.get_setting(conn, "offline_mode", False):
@@ -270,12 +330,14 @@ def push(cfg, conn):
                        "votes_open": db.get_setting(conn, "votes_open", True),
                        "invitation_required": db.get_setting(conn, "invitation_required", False),
                        "max_proposals": db.get_setting(conn, "max_proposals", cfg.max_proposals)}
-    rows = conn.execute("""SELECT m.remote_id,p.id,p.state,p.withdrawn_at,p.sort_order,s.title,s.artist
+    _text(public_settings["event_name"], 150, required=True)
+    if (any(type(public_settings[key]) is not bool for key in ("proposals_open", "votes_open", "invitation_required"))
+            or type(public_settings["max_proposals"]) is not int or public_settings["max_proposals"] < 0):
+        raise CloudSyncError("Réglages publics invalides. Corrigez-les avant de publier.")
+    rows = conn.execute("""SELECT m.remote_id,p.id,p.state,p.withdrawn_at,p.sort_order,s.title,s.artist,s.duration
       FROM cloud_map m JOIN proposals p ON p.id=CAST(m.local_id AS INTEGER)
       JOIN sources s ON s.id=p.source_id
       WHERE m.kind='proposal' AND substr(m.remote_id,1,length(?))=?""", (prefix, prefix)).fetchall()
-    if len(rows) > 10000:
-        raise CloudSyncError("Trop de propositions à publier en une opération (maximum 10000).")
     # Avoid selecting a withdrawn historical mapping as the canonical merge target.
     latest = db.get_setting(conn, "cloud_withdrawn_remote_" + project, [])
     withdrawn_remote = {str(value) for value in latest if type(value) is int}
@@ -283,18 +345,43 @@ def push(cfg, conn):
     for row in sorted(rows, key=lambda item: (item["remote_id"].split(":", 1)[1] in withdrawn_remote,
                                             int(item["remote_id"].split(":", 1)[1]))):
         remote = _identifier(int(row["remote_id"].split(":", 1)[1]))
-        if len(row["title"]) > 300 or len(row["artist"]) > 150:
-            raise CloudSyncError("Une métadonnée dépasse les limites publiques : titre 300 caractères, artiste 150. Corrigez-la avant de publier.")
+        try:
+            _text(row["title"], 300, required=True)
+            _text(row["artist"], 150)
+            if (row["state"] not in {"pending", "approved", "rejected", "archived"}
+                    or type(row["sort_order"]) is not int or abs(row["sort_order"]) > 999999999):
+                raise CloudSyncError("État ou ordre public invalide.")
+        except CloudSyncError:
+            raise CloudSyncError("Une métadonnée publique est invalide : titre obligatoire, 300 caractères, artiste 150, sans caractères de contrôle. Corrigez-la avant de publier.") from None
         update = {"id": remote,
                   "state": "archived" if row["id"] in seen_local or row["withdrawn_at"] or str(remote) in withdrawn_remote else row["state"],
                   "title": row["title"], "artist": row["artist"], "sort_order": row["sort_order"]}
+        if row["duration"] is not None:
+            duration = row["duration"]
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration < 1e8:
+                raise CloudSyncError("Une durée locale est invalide. Corrigez-la avant de publier.")
+            update["duration"] = duration
         if row["id"] in seen_local and row["state"] != "archived" and not row["withdrawn_at"] and str(remote) not in withdrawn_remote:
             update["merge_into"] = seen_local[row["id"]]
         updates.append(update)
         if str(remote) not in withdrawn_remote and not row["withdrawn_at"]:
             seen_local.setdefault(row["id"], remote)
-    result = _rpc(cfg, "playlist25_admin_publish", {"p_settings": public_settings, "p_updates": updates})
-    if not isinstance(result, dict) or not isinstance(result.get("updated"), int):
-        raise CloudSyncError("Réponse de publication invalide. Actualisez le site public pour vérifier son état.")
+    # Validate all metadata before the first network mutation. Each small RPC is
+    # atomic; a later network failure is explicit and the whole action is safe
+    # to repeat. Repeated canonical merge targets are excluded from the count.
+    published, requests, result = set(), 0, {}
+    for batch in _publication_batches(updates) if updates else [[]]:
+        try:
+            result = _rpc(cfg, "playlist25_admin_publish", {"p_settings": public_settings, "p_updates": batch})
+            if (not isinstance(result, dict) or type(result.get("updated")) is not int
+                    or result["updated"] != len(batch)):
+                raise CloudSyncError("Réponse de publication invalide. Actualisez le site public pour vérifier son état.")
+        except CloudSyncError as error:
+            if published:
+                raise CloudSyncError(f"Publication interrompue après {len(published)} propositions. Relancez Publier sur Internet pour terminer tous les lots. {error}") from None
+            raise
+        published.update(entry["id"] for entry in batch)
+        requests += 1
     db.set_setting(conn, "cloud_last_publish", db.now())
-    return {**result, "message": "Réglages et modération publiés. Aucun fichier audio ni secret envoyé au site public."}
+    return {**result, "updated": len(published), "batches": requests,
+            "message": "Réglages et modération publiés. Aucun fichier audio ni secret envoyé au site public."}

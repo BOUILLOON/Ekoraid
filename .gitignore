@@ -13,3 +13,5 @@ site/
 _site/
 site-public/
 cloud/supabase/.temp/
+build/
+dist/

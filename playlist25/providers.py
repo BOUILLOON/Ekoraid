@@ -81,7 +81,9 @@ def parse_youtube_url(url: str, mode: str | None = None) -> dict:
 def yt_dlp_command(cfg) -> list[str]:
     """Use the current Python environment, or an explicitly configured executable."""
     executable = getattr(cfg, "yt_dlp_path", "")
-    if not executable or executable == "yt-dlp" or executable == sys.executable:
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--yt-dlp"]
+    elif not executable or executable == "yt-dlp" or executable == sys.executable:
         command = [sys.executable, "-m", "yt_dlp"]
     elif isinstance(executable, (list, tuple)):
         command = list(executable)
@@ -98,12 +100,17 @@ def yt_dlp_command(cfg) -> list[str]:
 def _metadata(target: str, cfg, *, playlist: bool = False, limit: int | None = None) -> tuple[dict, str]:
     command = yt_dlp_command(cfg) + ["--skip-download", "--dump-single-json", "--no-progress"]
     if playlist:
-        command += ["--flat-playlist", "--ignore-errors", "--playlist-end", str(limit)]
+        command += ["--flat-playlist", "--ignore-errors"]
+        if limit is not None:
+            command += ["--playlist-end", str(limit)]
     else:
         command += ["--no-playlist"]
     command += ["--", target]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=min(getattr(cfg, "task_timeout", 600), 120), check=False)
+        timeout = getattr(cfg, "task_timeout", 600)
+        if not playlist or limit is not None:
+            timeout = min(timeout, 120)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
         raise SourceError("L'analyse YouTube a dépassé son délai. Réessayez ou proposez le titre manuellement.", "timeout", status=503) from exc
     except OSError as exc:
@@ -163,12 +170,12 @@ def search(query: str, cfg) -> list[dict]:
     return [entry for i, item in enumerate(info.get("entries") or [], 1) if (entry := _entry(item, i, cfg))["available"]]
 
 
-def _playlist_entries(raw_entries: list, cfg, cap: int) -> tuple[list[dict], list[str], bool, int]:
+def _playlist_entries(raw_entries: list, cfg, cap: int | None) -> tuple[list[dict], list[str], bool, int]:
     """Keep reported original positions; incomplete responses never invent certainty."""
     entries, warnings, gaps = [], [], []
     previous_position, known_indices, unknown_indices = 0, 0, 0
     unresolved = []
-    for item in raw_entries[:cap]:
+    for item in raw_entries if cap is None else raw_entries[:cap]:
         original = item.get("playlist_index") if isinstance(item, dict) else None
         if original is not None:
             if isinstance(original, str) and original.isascii() and original.isdecimal():
@@ -209,8 +216,9 @@ def analyze(url: str, cfg, mode: str | None = None) -> dict:
     if parsed["kind"] == "choice":
         raise SourceError("Ce lien contient un morceau et une playlist. Choisissez ce morceau seulement ou toute la playlist.", "need_choice", status=409, need_choice=True)
     is_playlist = parsed["kind"] == "playlist"
-    cap = max(1, min(int(getattr(cfg, "max_playlist_items", 500)), 10000))
-    info, diagnostic = _metadata(parsed["url"], cfg, playlist=is_playlist, limit=cap + 1)
+    configured_limit = int(getattr(cfg, "max_playlist_items", 0))
+    cap = configured_limit if configured_limit > 0 else None
+    info, diagnostic = _metadata(parsed["url"], cfg, playlist=is_playlist, limit=cap + 1 if cap is not None else None)
     raw_entries = info.get("entries") if is_playlist else [info]
     if not isinstance(raw_entries, list):
         raise SourceError("La playlist n'a pas fourni de liste exploitable.", "unavailable", status=503)
@@ -220,7 +228,7 @@ def analyze(url: str, cfg, mode: str | None = None) -> dict:
         entries, warnings, complete, known_indices = [_entry(info, 1, cfg)], [], True, 0
     raw_count = info.get("playlist_count") or info.get("n_entries")
     count = int(raw_count) if isinstance(raw_count, (int, float)) and not isinstance(raw_count, bool) and math.isfinite(raw_count) and raw_count >= 0 and int(raw_count) == raw_count else None
-    if len(raw_entries) > cap or count is not None and count > cap:
+    if cap is not None and (len(raw_entries) > cap or count is not None and count > cap):
         complete = False
         warnings.append(f"Limite de {cap} éléments atteinte : cette analyse n'est pas complète. Augmentez la limite explicitement pour récupérer la suite.")
     elif count is not None and count > len(raw_entries):
@@ -242,17 +250,18 @@ def analyze(url: str, cfg, mode: str | None = None) -> dict:
 
 
 def analyze_links(text: str, cfg) -> dict:
-    if not isinstance(text, str) or len(text) > 128_000:
-        raise SourceError("Le fichier de liens est trop volumineux.")
+    if not isinstance(text, str):
+        raise SourceError("Collez un lien YouTube par ligne.")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         raise SourceError("Collez au moins un lien YouTube.")
-    cap = max(1, min(int(getattr(cfg, "max_playlist_items", 500)), 10000))
+    configured_limit = int(getattr(cfg, "max_playlist_items", 0))
+    cap = configured_limit if configured_limit > 0 else None
     entries, warnings = [], []
-    complete = len(lines) <= cap
+    complete = cap is None or len(lines) <= cap
     if not complete:
         warnings.append(f"Le texte contient {len(lines)} liens ; seuls les {cap} premiers sont analysés. Augmentez la limite explicitement pour la suite.")
-    for position, line in enumerate(lines[:cap], 1):
+    for position, line in enumerate(lines if cap is None else lines[:cap], 1):
         try:
             parsed = parse_youtube_url(line)
             if parsed["kind"] == "choice":

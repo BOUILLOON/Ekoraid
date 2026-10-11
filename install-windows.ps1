@@ -23,7 +23,7 @@ if (-not (Test-Path '.venv\Scripts\python.exe')) {
 }
 $VenvPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 & $VenvPython -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'
-if ($LASTEXITCODE -ne 0) { throw 'Le dossier .venv existant utilise une version trop ancienne de Python. Conservez-le ailleurs, puis relancez l’installation.' }
+if ($LASTEXITCODE -ne 0) { throw 'Le dossier .venv existant utilise une version trop ancienne de Python. Conservez-le ailleurs, puis relancez l''installation.' }
 & $VenvPython -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('pip') else 1)"
 if ($LASTEXITCODE -ne 0) {
     & $VenvPython -m ensurepip --upgrade

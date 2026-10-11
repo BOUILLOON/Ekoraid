@@ -82,7 +82,7 @@ def prepare_pack(conn: sqlite3.Connection, cfg, source_ids: list[int] | None = N
     Path(cfg.export_dir).mkdir(parents=True, exist_ok=True)
     base = Path(cfg.export_dir).resolve()
     if source_ids is not None:
-        if not isinstance(source_ids, (list, tuple)) or len(source_ids) > int(cfg.max_queue_size):
+        if not isinstance(source_ids, (list, tuple)) or cfg.max_queue_size > 0 and len(source_ids) > int(cfg.max_queue_size):
             raise ExportError("La sélection dépasse la limite technique d'export.")
         if any(isinstance(sid, bool) or not isinstance(sid, int) or sid < 1 for sid in source_ids):
             raise ExportError("La sélection contient un identifiant invalide.")
@@ -94,7 +94,7 @@ def prepare_pack(conn: sqlite3.Connection, cfg, source_ids: list[int] | None = N
             WHERE s.file_path IS NOT NULL
             GROUP BY s.id ORDER BY CASE WHEN MIN(p.sort_order) IS NULL THEN 1 ELSE 0 END, MIN(p.sort_order), s.id
         """)]
-        if len(ids) > int(cfg.max_queue_size):
+        if cfg.max_queue_size > 0 and len(ids) > int(cfg.max_queue_size):
             raise ExportError("La bibliothèque dépasse la limite technique d'export ; choisissez une sélection.")
     warnings = []
     selected = []

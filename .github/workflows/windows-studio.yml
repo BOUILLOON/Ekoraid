@@ -1,0 +1,101 @@
+name: Studio Fanny — Windows autonome
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag de livraison (studio-windows-v…)"
+        required: true
+        default: studio-windows-v2026.10.11.1
+        type: string
+      publish_release:
+        description: Publier le ZIP vérifié dans une release GitHub
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-fanny-windows
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build et vérification Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-desktop-build.txt
+      - name: Installer les versions épinglées
+        run: python -m pip install -r requirements.txt -r requirements-desktop-build.txt
+      - name: Vérifier les tests de distribution
+        run: python -m pytest tests/test_desktop_packaging.py -q
+      - name: Construire, ouvrir la fenêtre et tester le ZIP audio autorisé
+        run: python scripts/build_windows.py --work build/windows --destination dist/windows
+      - name: Conserver le ZIP et ses preuves de vérification
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Studio-Fanny-Windows
+          path: |
+            dist/windows/Studio-Fanny-Windows.zip
+            dist/windows/Studio-Fanny-Windows.zip.sha256
+            dist/windows/build-info.json
+            dist/windows/windows-smoke.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Conserver le rapport en cas d'échec du lancement Windows
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Studio-Fanny-diagnostic-Windows
+          path: build/windows/windows-smoke.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Publier la release après le test Windows réel
+        if: inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^studio-windows-v[0-9][A-Za-z0-9._-]{0,60}$') {
+            throw 'Le tag doit commencer par studio-windows-v et contenir une version simple.'
+          }
+          $description = @'
+          Application Windows 11 x64 autonome : extraire tout le ZIP puis ouvrir Studio-Fanny.exe. Python, Node.js et FFmpeg sont intégrés.
+
+          La fenêtre, les services privés, la conversion d'un WAV généré localement, le contrôle audio et l'export ZIP/M3U8 ont été testés sur le runner Windows. Aucun morceau YouTube commercial n'a été téléchargé et aucune donnée Supabase n'a été modifiée. Le rapport de vérification et le SHA256 accompagnent l'archive.
+          '@
+          [IO.File]::WriteAllText('dist/windows/release-notes.txt', $description, [Text.UTF8Encoding]::new($false))
+          gh release view $env:RELEASE_TAG --repo $env:RELEASE_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw 'Ce tag possède déjà une release : choisissez une nouvelle version pour préserver la livraison existante.'
+          }
+          gh release create $env:RELEASE_TAG `
+            dist/windows/Studio-Fanny-Windows.zip `
+            dist/windows/Studio-Fanny-Windows.zip.sha256 `
+            dist/windows/build-info.json `
+            dist/windows/windows-smoke.json `
+            --repo $env:RELEASE_REPOSITORY --target $env:RELEASE_COMMIT `
+            --title "Studio Fanny pour Windows — $env:RELEASE_TAG" `
+            --notes-file dist/windows/release-notes.txt --latest
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Publication de la release refusée. Le ZIP testé reste disponible dans les artefacts de ce workflow.'
+          }
+          "Téléchargement : https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG/Studio-Fanny-Windows.zip" >> $env:GITHUB_STEP_SUMMARY
+          "Raccourci de la dernière livraison : https://github.com/$env:RELEASE_REPOSITORY/releases/latest/download/Studio-Fanny-Windows.zip" >> $env:GITHUB_STEP_SUMMARY

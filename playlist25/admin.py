@@ -30,6 +30,7 @@ from starlette.formparsers import MultiPartException
 
 from . import db, exports, library, providers
 from .config import Settings
+from .guest_playlists import classify_source
 from .security import csrf_token, install_session, rate_limit, require_admin, require_csrf
 from .queue import enqueue_sources, queue_snapshot
 
@@ -51,8 +52,12 @@ class ProposalPatch(Input):
 
 
 class ProposalBatchPatch(Input):
-    proposal_ids: list[StrictInt] = Field(min_length=1, max_length=10000)
+    proposal_ids: list[StrictInt] = Field(min_length=1)
     state: str
+
+
+class ProposalOrderInput(Input):
+    proposal_ids: list[StrictInt] = Field(min_length=1)
 
 
 class MergeInput(Input):
@@ -83,18 +88,18 @@ class LinksInput(Input):
 
 class PlaylistImport(Input):
     analysis: dict[str, Any]
-    positions: list[StrictInt] | None = Field(default=None, max_length=10000)
+    positions: list[StrictInt] | None = None
     download: StrictBool = False
     rights_confirmed: StrictBool = False
 
 
 class DownloadInput(Input):
-    source_ids: list[StrictInt] = Field(min_length=1, max_length=10000)
+    source_ids: list[StrictInt] = Field(min_length=1)
     rights_confirmed: StrictBool = False
 
 
 class RetryInput(Input):
-    source_ids: list[StrictInt] | None = Field(default=None, max_length=10000)
+    source_ids: list[StrictInt] | None = None
     rights_confirmed: StrictBool = False
 
 
@@ -108,7 +113,7 @@ class LibraryPatch(Input):
 
 
 class ExportInput(Input):
-    source_ids: list[StrictInt] | None = Field(default=None, max_length=10000)
+    source_ids: list[StrictInt] | None = None
     make_zip: StrictBool = True
 
 
@@ -120,8 +125,8 @@ class SettingsPatch(Input):
     invitation_required: StrictBool | None = None
     public_url: str | None = Field(default=None, max_length=2048)
     local_url: str | None = Field(default=None, min_length=1, max_length=2048)
-    max_playlist_items: int | None = Field(default=None, ge=1, le=10000)
-    max_proposals: int | None = Field(default=None, ge=1, le=1000)
+    max_playlist_items: int | None = Field(default=None, ge=0)
+    max_proposals: int | None = Field(default=None, ge=0, le=1000)
     output_format: str | None = None
 
     @field_validator("output_format")
@@ -245,7 +250,7 @@ def _source_ids(ids: list[int], cfg: Settings) -> list[int]:
     if any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in ids):
         raise HTTPException(422, "La sélection contient un identifiant de morceau invalide.")
     ids = list(dict.fromkeys(ids))
-    if len(ids) > cfg.max_queue_size:
+    if cfg.max_queue_size and len(ids) > cfg.max_queue_size:
         raise HTTPException(422, f"Sélection limitée à {cfg.max_queue_size} morceaux par opération.")
     return ids
 
@@ -264,6 +269,56 @@ def _provider_error(exc: Exception) -> HTTPException:
     if not isinstance(status, int) or not 400 <= status <= 599:
         status = 400
     return HTTPException(status, str(exc))
+
+
+def _validated_playlist_analysis(result: Any, cfg: Settings, source_url: str) -> dict[str, Any]:
+    """Validate the complete provider result before writing any playlist rows."""
+    if not isinstance(result, dict) or result.get("kind") != "playlist" or not isinstance(result.get("entries"), list):
+        raise ValueError("Le fournisseur a retourné une analyse de playlist invalide.")
+    result = copy.deepcopy(result)
+    if cfg.max_playlist_items and len(result["entries"]) > cfg.max_playlist_items:
+        raise ValueError("L’analyse dépasse la limite de playlist configurée.")
+    positions = set()
+    for entry in result["entries"]:
+        if not isinstance(entry, dict):
+            raise ValueError("L’analyse contient une entrée invalide.")
+        position = entry.get("position")
+        if not isinstance(position, int) or isinstance(position, bool) or position < 1 or position in positions:
+            raise ValueError("L’analyse contient des positions invalides ou répétées.")
+        positions.add(position)
+        if entry.get("available"):
+            parsed = providers.parse_youtube_url(entry.get("url", ""), mode="video")
+            if not parsed.get("video_id") or parsed["video_id"] != entry.get("video_id"):
+                raise ValueError("Une vidéo analysée ne correspond pas à sa source.")
+            entry["url"] = parsed["url"]
+            duration = entry.get("duration")
+            if duration is not None and (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                                         or not math.isfinite(duration) or duration < 0):
+                raise ValueError("Une vidéo analysée contient une durée invalide.")
+            # Status is derived from our queue and verified files, never metadata.
+            entry.pop("status", None)
+    result["title"] = str(result.get("title") or "Playlist YouTube")[:500]
+    result["source_url"] = source_url
+    result["complete"] = bool(result.get("complete", False))
+    warnings = result.get("warnings", [])
+    result["warnings"] = [str(warning)[:2000] for warning in (warnings if isinstance(warnings, list) else [warnings])]
+    return result
+
+
+def _store_playlist(conn: sqlite3.Connection, analysis: dict[str, Any], selected: set[int]) -> tuple[int, list[int]]:
+    playlist_id = conn.execute("INSERT INTO playlists(title,source_url,analysis_complete,warnings,created_at) VALUES(?,?,?,?,?)",
+                               (str(analysis.get("title") or "Playlist importée")[:500], str(analysis.get("source_url") or "")[:1000000],
+                                int(analysis.get("complete", False)), json.dumps(analysis.get("warnings", []), ensure_ascii=False), db.now())).lastrowid
+    ids = []
+    for entry in analysis["entries"]:
+        source_id = db.upsert_source(conn, entry) if entry.get("available") else None
+        chosen = entry["position"] in selected and bool(entry.get("available"))
+        if chosen:
+            ids.append(source_id)
+        conn.execute("INSERT INTO playlist_entries(playlist_id,position,source_id,title,available,reason,selected) VALUES(?,?,?,?,?,?,?)",
+                     (playlist_id, entry["position"], source_id, str(entry.get("title") or "Élément indisponible")[:1000],
+                      int(bool(entry.get("available"))), str(entry.get("reason") or "")[:2000], int(chosen)))
+    return playlist_id, list(dict.fromkeys(ids))
 
 
 def _present(conn: sqlite3.Connection, cfg: Settings, row: Any) -> bool:
@@ -336,7 +391,7 @@ def create_admin_app(cfg: Settings) -> FastAPI:
     app.state.cfg = cfg
     install_session(app, cfg, "playlist_admin")
     app.add_middleware(_UploadRequestLimit, maximum=cfg.max_upload_mb * 1024 * 1024 + 65536)
-    static_dir = cfg.root / "playlist25" / "static"
+    static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -361,7 +416,7 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             raise HTTPException(502, "L'analyse du fournisseur est invalide.")
         with _connection(cfg) as conn:
             limit = int(db.get_setting(conn, "max_playlist_items", cfg.max_playlist_items))
-            if len(result["entries"]) > limit:
+            if limit and len(result["entries"]) > limit:
                 raise HTTPException(422, f"L'analyse dépasse la limite de {limit} éléments. Relevez-la explicitement dans les réglages.")
             positions: set[int] = set()
             for entry in result["entries"]:
@@ -464,7 +519,17 @@ def create_admin_app(cfg: Settings) -> FastAPI:
     @app.get("/api/proposals", dependencies=protected)
     def proposals_list() -> dict[str, Any]:
         with _connection(cfg) as conn:
-            return {"items": db.list_proposals(conn, include_hidden=True)}
+            items = db.list_proposals(conn, include_hidden=True)
+            playlist_sources = {}
+            for item in items:
+                item["source_kind"] = classify_source(item)
+                if item["source_kind"] == "playlist":
+                    url = item["url"]
+                    if url not in playlist_sources:
+                        latest = conn.execute("SELECT id FROM playlists WHERE source_url=? ORDER BY id DESC LIMIT 1", (url,)).fetchone()
+                        playlist_sources[url] = [row[0] for row in conn.execute("SELECT DISTINCT source_id FROM playlist_entries WHERE playlist_id=? AND selected=1 AND available=1 AND source_id IS NOT NULL", (latest["id"],))] if latest else []
+                    item["playlist_source_ids"] = playlist_sources[url]
+            return {"items": items}
 
     @app.patch("/api/proposals", dependencies=modifying)
     def proposals_update(payload: ProposalBatchPatch) -> dict[str, Any]:
@@ -475,15 +540,38 @@ def create_admin_app(cfg: Settings) -> FastAPI:
         ids = list(dict.fromkeys(payload.proposal_ids))
         with _connection(cfg) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            placeholders = ",".join("?" for _ in ids)
-            rows = conn.execute(f"SELECT id,withdrawn_at FROM proposals WHERE id IN ({placeholders})", ids).fetchall()
+            chunks = [ids[offset:offset + 900] for offset in range(0, len(ids), 900)]
+            rows = []
+            for chunk in chunks:
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(conn.execute(f"SELECT id,withdrawn_at FROM proposals WHERE id IN ({placeholders})", chunk).fetchall())
             if len(rows) != len(ids):
                 raise HTTPException(404, "Une proposition de la sélection est introuvable. Actualisez la liste.")
             if payload.state != "archived" and any(row["withdrawn_at"] for row in rows):
                 raise HTTPException(409, "Une proposition a été retirée par l’invité·e. Son retrait reste enregistré ; aucune proposition de cette sélection n’a été modifiée.")
-            conn.execute(f"UPDATE proposals SET state=? WHERE id IN ({placeholders})", [payload.state, *ids])
+            for chunk in chunks:
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(f"UPDATE proposals SET state=? WHERE id IN ({placeholders})", [payload.state, *chunk])
             conn.commit()
             return {"count": len(ids), "state": payload.state}
+
+    @app.put("/api/proposals/order", dependencies=modifying)
+    def proposals_order(payload: ProposalOrderInput) -> dict[str, int]:
+        ids = payload.proposal_ids
+        if any(proposal_id <= 0 for proposal_id in ids) or len(ids) != len(set(ids)):
+            raise HTTPException(422, "L’ordre contient des identifiants invalides ou répétés.")
+        with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            found = 0
+            for offset in range(0, len(ids), 900):
+                chunk = ids[offset:offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                found += conn.execute(f"SELECT COUNT(*) FROM proposals WHERE id IN ({placeholders})", chunk).fetchone()[0]
+            if found != len(ids):
+                raise HTTPException(404, "Une proposition de l’ordre est introuvable. Actualisez la liste ; aucun ordre n’a été modifié.")
+            conn.executemany("UPDATE proposals SET sort_order=? WHERE id=?", ((position, proposal_id) for position, proposal_id in enumerate(ids)))
+            conn.commit()
+            return {"count": len(ids)}
 
     @app.patch("/api/proposals/{proposal_id}", dependencies=modifying)
     def proposal_update(proposal_id: int, payload: ProposalPatch) -> dict[str, Any]:
@@ -660,26 +748,11 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             raise HTTPException(422, "Confirmez que vous disposez des autorisations nécessaires avant le téléchargement.")
         with _connection(cfg) as conn:
             limit = int(db.get_setting(conn, "max_playlist_items", cfg.max_playlist_items))
-            if len(analysis["entries"]) > limit:
+            if limit and len(analysis["entries"]) > limit:
                 raise HTTPException(422, "L'analyse dépasse la limite actuelle. Modifiez les réglages puis réanalysez.")
             if payload.download:
                 _online(conn)
-            cur = conn.execute("INSERT INTO playlists(title,source_url,analysis_complete,warnings,created_at) VALUES(?,?,?,?,?)",
-                               (str(analysis.get("title") or "Playlist importée")[:500], str(analysis.get("source_url") or "")[:1000000],
-                                int(analysis.get("complete", False)), json.dumps(analysis.get("warnings", []), ensure_ascii=False), db.now()))
-            playlist_id = cur.lastrowid
-            ids: list[int] = []
-            for entry in analysis["entries"]:
-                source_id = None
-                if entry.get("available"):
-                    source_id = db.upsert_source(conn, entry)
-                    if entry["position"] in selected:
-                        ids.append(source_id)
-                conn.execute("INSERT INTO playlist_entries(playlist_id,position,source_id,title,available,reason,selected) VALUES(?,?,?,?,?,?,?)",
-                             (playlist_id, entry["position"], source_id, str(entry.get("title") or "Élément indisponible")[:1000],
-                              int(bool(entry.get("available"))), str(entry.get("reason") or "")[:2000],
-                              int(entry["position"] in selected and bool(entry.get("available")))))
-            ids = list(dict.fromkeys(ids))
+            playlist_id, ids = _store_playlist(conn, analysis, selected)
             queue_result = None
             if payload.download:
                 queue_result = enqueue_sources(conn, cfg, _source_ids(ids, cfg))
@@ -706,11 +779,70 @@ def create_admin_app(cfg: Settings) -> FastAPI:
         with _connection(cfg) as conn:
             _online(conn)
             _existing_sources(conn, ids)
+            effective = _effective_cfg(conn, cfg)
+            sources = [dict(conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()) for source_id in ids]
+        prepared = {}
+        direct_ids, warnings, skipped = [], [], []
+        for source in sources:
+            if classify_source(source) != "playlist":
+                direct_ids.append(source["id"])
+                continue
+            url = source["url"]
+            if url in prepared:
+                prepared[url]["origins"].append(source["id"])
+                continue
             try:
-                result = enqueue_sources(conn, cfg, ids)
+                analysis = _validated_playlist_analysis(providers.analyze(url, effective, mode="playlist"), effective, url)
+            except (ValueError, TypeError) as exc:
+                reason = f"Playlist « {source['title']} » non analysée : {exc}"
+                warnings.append(reason)
+                skipped.append({"source_id": source["id"], "reason": reason})
+                continue
+            prepared[url] = {"analysis": analysis, "origins": [source["id"]]}
+        expanded = []
+        with _connection(cfg) as conn:
+            _online(conn)
+            _existing_sources(conn, ids)
+            conn.execute("BEGIN IMMEDIATE")
+            queue_ids = list(direct_ids)
+            for prepared_playlist in prepared.values():
+                analysis = prepared_playlist["analysis"]
+                selected = {entry["position"] for entry in analysis["entries"] if entry.get("available")}
+                # A failed expansion cannot leave partial playlist/source rows.
+                conn.execute("SAVEPOINT playlist_expansion")
+                try:
+                    playlist_id, track_ids = _store_playlist(conn, analysis, selected)
+                except (ValueError, TypeError, sqlite3.IntegrityError) as exc:
+                    conn.execute("ROLLBACK TO SAVEPOINT playlist_expansion")
+                    conn.execute("RELEASE SAVEPOINT playlist_expansion")
+                    reason = f"Playlist « {analysis['title']} » non enregistrée : {exc}"
+                    warnings.append(reason)
+                    skipped.extend({"source_id": origin, "reason": reason} for origin in prepared_playlist["origins"])
+                    continue
+                conn.execute("RELEASE SAVEPOINT playlist_expansion")
+                queue_ids.extend(track_ids)
+                origins = prepared_playlist["origins"]
+                expanded.append({"source_id": origins[0], "proposal_source_ids": origins, "playlist_id": playlist_id,
+                                 "title": analysis["title"], "source_ids": track_ids,
+                                 "complete": analysis["complete"], "warnings": analysis["warnings"]})
+                warnings.extend(f"Playlist « {analysis['title']} » : {warning}" for warning in analysis["warnings"])
+                if not analysis["complete"]:
+                    warnings.append(f"Playlist « {analysis['title']} » : analyse incomplète ; seuls les éléments retournés et disponibles ont été ajoutés.")
+                absent = sum(not entry.get("available") for entry in analysis["entries"])
+                if absent:
+                    warnings.append(f"Playlist « {analysis['title']} » : {absent} entrée(s) indisponible(s) conservée(s) dans le rapport, sans téléchargement.")
+                if not track_ids:
+                    reason = f"Playlist « {analysis['title']} » : aucun morceau disponible à préparer."
+                    warnings.append(reason)
+                    skipped.extend({"source_id": origin, "reason": reason} for origin in origins)
+            try:
+                result = enqueue_sources(conn, cfg, _source_ids(list(dict.fromkeys(queue_ids)), cfg))
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             conn.commit()
+            result["skipped"] = [*result.get("skipped", []), *skipped]
+            result["warnings"] = list(dict.fromkeys(warnings))
+            result["expanded_playlists"] = expanded
             return result
 
     @app.post("/api/downloads/retry", dependencies=modifying)

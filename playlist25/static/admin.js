@@ -2,7 +2,8 @@
 
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = { session: null, settings: {}, view: "dashboard", proposals: [], selected: new Set(), library: [], exports: new Set(), analysis: null, positions: new Set(), jobs: [], paused: false, editing: null, rightsResolve: null, choiceResolve: null };
+  const state = { session: null, settings: {}, view: "dashboard", proposals: [], selected: new Set(), library: [], exports: new Set(), analysis: null, positions: new Set(), jobs: [], paused: false, editing: null, rightsResolve: null, choiceResolve: null, pages: {}, pagination: {}, playlists: [], queueResult: null };
+  const PAGE_SIZE = 100;
   const labels = { pending: "À vérifier", approved: "Validé", rejected: "Refusé", archived: "Archivé", queued: "En attente", downloading: "Téléchargement", converting: "Conversion", verifying: "Vérification", available: "Disponible", interrupted: "Interrompu", unavailable: "Indisponible", failed: "Erreur", error: "Erreur", stopped: "Arrêté" };
   const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
   const button = (text, action, classes = "button subtle small") => { const node = el("button", classes, text); node.type = "button"; node.addEventListener("click", action); return node; };
@@ -11,6 +12,19 @@
   const duration = (seconds) => { if (seconds == null || !Number.isFinite(Number(seconds))) return "—"; const n = Math.floor(Number(seconds)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
   const totalDuration = (seconds) => { const n = Math.floor(Number(seconds || 0) / 60); return n >= 60 ? `${Math.floor(n / 60)} h ${String(n % 60).padStart(2, "0")}` : `${n} min`; };
   const number = (value) => Number(value || 0).toLocaleString("fr");
+  function pageItems(items, name, anchor, render) {
+    let controls = state.pagination[name];
+    if (!controls) {
+      const nav = el("nav", "list-pagination"), range = el("span"), actions = el("div", "pagination-controls"), label = el("span");
+      nav.id = `${name}-pagination`; nav.setAttribute("aria-label", "Pages de cette liste"); range.className = "pagination-range"; label.setAttribute("aria-live", "polite");
+      const move = (direction) => { state.pages[name] = (state.pages[name] || 1) + direction; render(); anchor.scrollIntoView({ block: "start" }); };
+      const prev = button("Précédent", () => move(-1)), next = button("Suivant", () => move(1)); prev.id = `${name}-prev`; next.id = `${name}-next`; label.id = `${name}-page-label`; range.id = `${name}-range-label`;
+      actions.append(prev, label, next); nav.append(range, actions); anchor.after(nav); controls = state.pagination[name] = { nav, range, label, prev, next };
+    }
+    const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE)), page = Math.min(pages, Math.max(1, state.pages[name] || 1)), start = (page - 1) * PAGE_SIZE;
+    state.pages[name] = page; controls.nav.classList.toggle("hidden", items.length <= PAGE_SIZE); controls.range.textContent = `${number(start + 1)}–${number(Math.min(start + PAGE_SIZE, items.length))} sur ${number(items.length)}`; controls.label.textContent = `Page ${number(page)} sur ${number(pages)}`; controls.prev.disabled = page === 1; controls.next.disabled = page === pages;
+    return { items: items.slice(start, start + PAGE_SIZE), start };
+  }
   const size = (bytes) => `${(Number(bytes || 0) / 1048576).toLocaleString("fr", { maximumFractionDigits: 1 })} Mo`;
   const status = (value) => el("span", `status-badge status-${value || "pending"}`, labels[value] || value || "À vérifier");
   const errorText = (value) => typeof value === "string" ? value : Array.isArray(value) ? value.map((item) => item.msg || "Saisie invalide").join(". ") : value?.message || value?.error || "Cette action n’a pas abouti. Vérifiez les diagnostics et réessayez.";
@@ -52,7 +66,7 @@
     $("#dashboard-offline").checked = !!settings.offline_mode;
     $("#dashboard-public-url").value = settings.public_url || "Lien public à configurer dans Réglages";
     $("#dashboard-local-url").value = settings.local_url || "http://127.0.0.1:8000";
-    ["event_name", "public_url", "local_url", "max_proposals", "max_playlist_items", "output_format"].forEach((key) => { $(`#setting-${key.replaceAll("_", "-")}`).value = settings[key] ?? ""; });
+    ["event_name", "public_url", "local_url", "max_proposals", "max_playlist_items", "output_format"].forEach((key) => { $(`#setting-${key.replaceAll("_", "-")}`).value = settings[key] ?? (["max_proposals", "max_playlist_items"].includes(key) ? 0 : ""); });
     ["proposals_open", "votes_open", "offline_mode", "invitation_required"].forEach((key) => { $(`#setting-${key.replaceAll("_", "-")}`).checked = !!settings[key]; });
   }
   async function navigate(view) {
@@ -100,7 +114,9 @@
   function renderProposals() {
     const body = $("#admin-proposals"); body.replaceChildren();
     const items = visibleProposals();
-    items.forEach((item, index) => {
+    const page = pageItems(items, "admin-proposals", body.closest(".table-scroll"), renderProposals);
+    page.items.forEach((item, localIndex) => {
+      const index = page.start + localIndex;
       const row = el("tr"), checkCell = el("td", "checkbox-cell"), check = el("input"); check.type = "checkbox"; check.checked = state.selected.has(item.id); check.disabled = !!item.withdrawn_at; check.setAttribute("aria-label", `Sélectionner ${item.title}`); check.addEventListener("change", () => { check.checked ? state.selected.add(item.id) : state.selected.delete(item.id); selectionCount(); }); checkCell.append(check);
       const track = el("td", "table-track"); track.append(el("strong", "", item.title), el("small", "", `${item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")} · proposé par ${item.nickname || "Organisation"}`));
       const sourceBadge = el("small", "muted", item.url ? `Source ${item.source_id} · ${labels[item.status] || item.status}` : "Sans source : associez un lien YouTube"); track.append(sourceBadge);
@@ -118,8 +134,7 @@
       const ordered = state.proposals.slice().sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || a.id - b.id);
       const index = ordered.findIndex((p) => p.id === item.id), otherIndex = ordered.findIndex((p) => p.id === other.id);
       [ordered[index], ordered[otherIndex]] = [ordered[otherIndex], ordered[index]];
-      // Assign stable positions, including equal initial sort_order values.
-      for (let i = 0; i < ordered.length; i++) if (ordered[i].sort_order !== i) await api(`/api/proposals/${ordered[i].id}`, { method: "PATCH", body: { sort_order: i } });
+      await api("/api/proposals/order", { method: "PUT", body: { proposal_ids: ordered.map((proposal) => proposal.id) } });
       await loadProposals();
     });
   }
@@ -130,12 +145,27 @@
     $("#edit-state").disabled = kind === "proposal" && !!item.withdrawn_at; $("#edit-withdrawal-note").classList.toggle("hidden", kind !== "proposal" || !item.withdrawn_at);
     $("#edit-url-field").classList.toggle("hidden", kind === "library"); $("#edit-state-field").classList.toggle("hidden", kind === "library"); feedback($("#edit-feedback"), ""); $("#edit-dialog").showModal();
   }
+  function renderMergeChoices(reset = false) {
+    const all = state.proposals.filter((item) => item.state !== "archived"), query = $("#merge-query").value.trim().toLocaleLowerCase("fr");
+    const matches = all.filter((item) => [item.title, item.nickname, `#${item.id}`].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)));
+    $("#merge-match-count").textContent = `${number(matches.length)} résultat(s). Jusqu’à ${PAGE_SIZE} choix affichés ; recherchez dans toute la collection. Les deux choix restent conservés pendant la recherche.`;
+    ["#merge-keep", "#merge-other"].forEach((selector, index) => {
+      const select = $(selector), chosen = reset ? all[index]?.id : Number(select.value), options = matches.slice(0, PAGE_SIZE), previous = all.find((item) => item.id === chosen);
+      if (previous && !options.some((item) => item.id === chosen)) options.unshift(previous);
+      select.replaceChildren(); options.forEach((item) => { const option = el("option", "", `#${item.id} · ${item.title} · ${item.nickname || "Organisation"}`); option.value = item.id; select.append(option); });
+      if (chosen && options.some((item) => item.id === chosen)) select.value = chosen;
+    });
+  }
   function confirmRights(text) { $("#rights-summary").textContent = text; $("#rights-confirm").checked = false; $("#rights-start").disabled = true; $("#rights-dialog").showModal(); return new Promise((resolve) => { state.rightsResolve = resolve; }); }
   function chooseScope() { $("#choice-dialog").showModal(); return new Promise((resolve) => { state.choiceResolve = resolve; }); }
   function queuedText(result) { const count = Array.isArray(result.queued) ? result.queued.length : Number(result.queued || 0), skipped = Array.isArray(result.skipped) ? result.skipped.length : Number(result.skipped || 0); return result.message || `${count} morceau${count > 1 ? "x" : ""} ajouté${count > 1 ? "s" : ""} à la file de préparation${skipped ? ` ; ${skipped} source(s) non ajoutée(s), détails ci-dessous` : ""}.`; }
   function queueFeedback(result) {
-    const target = $("#queue-request-feedback"); target.replaceChildren(); target.append(el("p", "feedback info", queuedText(result)));
-    (Array.isArray(result.skipped) ? result.skipped : []).forEach((item) => { const proposal = state.proposals.find((proposal) => proposal.source_id === item.source_id); target.append(el("p", "field-help", `${proposal?.title || `Source ${item.source_id}`} : ${item.reason || "source non ajoutée"}`)); });
+    state.queueResult = result; state.pages["queue-feedback"] = 1; renderQueueFeedback();
+  }
+  function renderQueueFeedback() {
+    const result = state.queueResult, target = $("#queue-request-feedback"); target.replaceChildren(); target.append(el("p", "feedback info", queuedText(result)));
+    const skipped = Array.isArray(result.skipped) ? result.skipped : [], titles = new Map(state.proposals.map((item) => [item.source_id, item.title]));
+    pageItems(skipped, "queue-feedback", target, renderQueueFeedback).items.forEach((item) => target.append(el("p", "field-help", `${titles.get(item.source_id) || `Source ${item.source_id}`} : ${item.reason || "source non ajoutée"}`)));
   }
   async function openReadyExports(sourceIds = null) {
     const items = (await api("/api/library")).items || [], wanted = sourceIds === null ? null : new Set(sourceIds);
@@ -157,9 +187,12 @@
     await work(null, async () => { const data = await api("/api/transfers/addresses"); (data.addresses || []).forEach((item) => { const option = el("option", "", item.label || item.host); option.value = item.host; select.append(option); }); feedback($("#transfer-feedback"), data.addresses?.length ? "Choisissez la connexion du PC utilisée par votre téléphone ou tablette, puis créez le QR code." : "Aucune connexion privée compatible n’est détectée. Connectez le PC au Wi-Fi, gardez le port invités actif, puis rouvrez ce partage.", data.addresses?.length ? "info" : "warning"); }, $("#transfer-feedback"));
   }
   async function loadPlaylists() {
-    const data = await api("/api/playlists"), target = $("#saved-playlists"); target.replaceChildren();
-    (data.items || []).forEach((item) => { const row = el("article", "list-row"), content = el("div", "list-row-content"); content.append(el("h3", "", item.title || "Playlist importée")); const entries = item.entries || []; content.append(el("p", "muted", `${entries.length} entrées · ordre d’origine conservé · ${item.analysis_complete ? "analyse complète" : "analyse incomplète"}`)); (item.warnings || []).forEach((warning) => content.append(el("small", "warning-text", warning))); row.append(content); const selected = entries.filter((entry) => entry.selected && entry.source_id && entry.available); if (selected.length) row.append(button("Préparer les fichiers de la sélection ↓", async (event) => { if (!await confirmRights(`${selected.length} entrée(s) sélectionnée(s) de cette playlist.`)) return; await work(event.currentTarget, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: Array.from(new Set(selected.map((entry) => entry.source_id))), rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); })); target.append(row); });
-    if (!data.items?.length) target.append(el("p", "empty-inline", "Vos playlists importées apparaîtront ici."));
+    state.playlists = (await api("/api/playlists")).items || []; renderPlaylists();
+  }
+  function renderPlaylists() {
+    const target = $("#saved-playlists"); target.replaceChildren();
+    pageItems(state.playlists, "saved-playlists", target, renderPlaylists).items.forEach((item) => { const row = el("article", "list-row"), content = el("div", "list-row-content"); content.append(el("h3", "", item.title || "Playlist importée")); const entries = item.entries || []; content.append(el("p", "muted", `${entries.length} entrées · ordre d’origine conservé · ${item.analysis_complete ? "analyse complète" : "analyse incomplète"}`)); (item.warnings || []).forEach((warning) => content.append(el("small", "warning-text", warning))); row.append(content); const selected = entries.filter((entry) => entry.selected && entry.source_id && entry.available); if (selected.length) row.append(button("Préparer les fichiers de la sélection ↓", async (event) => { if (!await confirmRights(`${selected.length} entrée(s) sélectionnée(s) de cette playlist.`)) return; await work(event.currentTarget, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: Array.from(new Set(selected.map((entry) => entry.source_id))), rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); })); target.append(row); });
+    if (!state.playlists.length) target.append(el("p", "empty-inline", "Vos playlists importées apparaîtront ici."));
   }
   async function analyzePlaylist(mode = null) {
     feedback($("#import-feedback"), "Analyse en cours : récupération des titres et des éléments indisponibles…");
@@ -172,15 +205,21 @@
   }
   function renderAnalysis() {
     const analysis = state.analysis, entries = analysis.entries || []; state.positions = new Set(entries.filter((entry) => entry.available).map((entry) => entry.position));
+    state.pages.analysis = 1;
     $("#analysis-panel").classList.remove("hidden"); $("#analysis-title").textContent = analysis.title || "Vos morceaux"; $("#analysis-completeness").textContent = analysis.complete ? "Analyse complète" : "Analyse incomplète — vérifiez le rapport";
     $("#analysis-summary").textContent = `${entries.length} entrées analysées · ${entries.filter((entry) => !entry.available).length} indisponibles · ${entries.filter((entry) => entry.already_available).length} fichiers déjà présents. L’ordre d’origine est conservé.`;
     const warnings = $("#analysis-warnings"); warnings.replaceChildren(); (analysis.warnings || []).forEach((warning) => warnings.append(el("p", "feedback warning", warning))); if (!analysis.complete) warnings.append(el("p", "feedback warning", "Cette liste ne doit pas être considérée comme la playlist complète. Les limites ou interruptions signalées doivent être vérifiées."));
-    const body = $("#analysis-entries"); body.replaceChildren(); entries.forEach((item) => {
-      const row = el("tr"), checkCell = el("td", "checkbox-cell"), check = el("input"); check.type = "checkbox"; check.checked = !!item.available; check.disabled = !item.available; check.setAttribute("aria-label", `Sélectionner la position ${item.position} : ${item.title}`); check.addEventListener("change", () => { check.checked ? state.positions.add(item.position) : state.positions.delete(item.position); analysisSelection(); }); checkCell.append(check);
+    renderAnalysisEntries();
+    feedback($("#import-feedback"), analysis.complete ? "Analyse terminée. Vérifiez et choisissez votre sélection." : "Analyse terminée avec des limites. Vérifiez les avertissements avant d’importer.", analysis.complete ? "success" : "warning");
+  }
+  function renderAnalysisEntries() {
+    const body = $("#analysis-entries"); body.replaceChildren();
+    pageItems(state.analysis?.entries || [], "analysis", body.closest(".table-scroll"), renderAnalysisEntries).items.forEach((item) => {
+      const row = el("tr"), checkCell = el("td", "checkbox-cell"), check = el("input"); check.type = "checkbox"; check.checked = state.positions.has(item.position); check.disabled = !item.available; check.setAttribute("aria-label", `Sélectionner la position ${item.position} : ${item.title}`); check.addEventListener("change", () => { check.checked ? state.positions.add(item.position) : state.positions.delete(item.position); analysisSelection(); }); checkCell.append(check);
       const track = el("td", "table-track"); track.append(el("strong", "", item.title || "Élément non résolu")); track.append(el("small", "", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Métadonnées limitées")));
       const availability = el("td"); availability.append(status(item.already_available ? "available" : item.available ? "pending" : "unavailable")); if (item.reason) availability.append(el("small", "warning-text", item.reason)); row.append(checkCell, el("td", "muted", item.position), track, el("td", "nowrap", duration(item.duration)), availability); body.append(row);
     });
-    analysisSelection(); feedback($("#import-feedback"), analysis.complete ? "Analyse terminée. Vérifiez et choisissez votre sélection." : "Analyse terminée avec des limites. Vérifiez les avertissements avant d’importer.", analysis.complete ? "success" : "warning");
+    analysisSelection();
   }
   function analysisSelection() { $("#analysis-selection-count").textContent = `${state.positions.size} morceau${state.positions.size > 1 ? "x" : ""} sélectionné${state.positions.size > 1 ? "s" : ""}`; $("#import-download").disabled = $("#import-only").disabled = !state.positions.size; }
   async function importAnalysis(download, trigger) {
@@ -198,7 +237,7 @@
     renderJobs();
   }
   function renderJobs() {
-    const target = $("#jobs-list"); target.replaceChildren(); state.jobs.forEach((job) => {
+    const target = $("#jobs-list"); target.replaceChildren(); pageItems(state.jobs, "jobs", target, renderJobs).items.forEach((job) => {
       const row = el("article", "job-row"), head = el("div", "job-head"), copy = el("div"); copy.append(el("h3", "", job.title || `Source ${job.source_id}`), el("small", "muted", `Source ${job.source_id} · ${job.attempts || 0} tentative(s)`)); head.append(copy, status(job.status)); row.append(head);
       const progress = el("progress"); progress.max = 100; progress.value = Math.min(100, Math.max(0, Number(job.progress || 0))); progress.setAttribute("aria-label", `Progression de ${job.title || job.source_id}`); row.append(progress);
       if (job.error) row.append(el("p", "feedback error", job.error));
@@ -216,12 +255,15 @@
   }
   function renderLibrary() {
     const q = $("#library-query").value.trim().toLocaleLowerCase("fr"), target = $("#library-list"); target.replaceChildren(); $("#library-count").textContent = `${state.library.length} fichier(s) disponible(s)`;
-    state.library.filter((item) => [item.title, item.artist].some((v) => (v || "").toLocaleLowerCase("fr").includes(q))).forEach((item) => { const row = el("article", "library-row"), image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; const content = el("div", "list-row-content"); content.append(el("h3", "", item.title), el("p", "muted", `${item.artist || "Artiste à préciser"} · ${duration(item.duration)} · source ${item.id}`)); const audio = el("audio"); audio.controls = true; audio.preload = "none"; audio.src = `/api/library/${item.id}/audio`; audio.setAttribute("aria-label", `Écouter ${item.title}`); row.append(image, content, audio, button("Renommer", () => edit(item, "library"))); target.append(row); });
+    const items = state.library.filter((item) => [item.title, item.artist].some((v) => (v || "").toLocaleLowerCase("fr").includes(q)));
+    pageItems(items, "library", target, renderLibrary).items.forEach((item) => { const row = el("article", "library-row"), image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; const content = el("div", "list-row-content"); content.append(el("h3", "", item.title), el("p", "muted", `${item.artist || "Artiste à préciser"} · ${duration(item.duration)} · source ${item.id}`)); const audio = el("audio"); audio.controls = true; audio.preload = "none"; audio.src = `/api/library/${item.id}/audio`; audio.setAttribute("aria-label", `Écouter ${item.title}`); row.append(image, content, audio, button("Renommer", () => edit(item, "library"))); target.append(row); });
     if (!target.children.length) target.append(el("p", "empty-inline", state.library.length ? "Aucun fichier pour cette recherche." : "Vos fichiers disponibles apparaîtront ici après téléchargement ou import."));
   }
+  function exportItems() { const q = $("#export-query").value.trim().toLocaleLowerCase("fr"); return state.library.filter((item) => [item.title, item.artist].some((value) => (value || "").toLocaleLowerCase("fr").includes(q))); }
   function renderExportSelection() {
-    const target = $("#export-selection"); target.replaceChildren(); state.library.forEach((item) => { const label = el("label", "export-check"), check = el("input"); check.type = "checkbox"; check.checked = state.exports.has(item.id); check.addEventListener("change", () => { check.checked ? state.exports.add(item.id) : state.exports.delete(item.id); exportSelectionCount(); }); const copy = el("span"); copy.append(el("strong", "", item.title), el("small", "muted", `${item.artist || "Artiste à préciser"} · ${duration(item.duration)}`)); label.append(check, copy); target.append(label); });
-    if (!state.library.length) target.append(el("p", "empty-inline", "Préparez d’abord les fichiers dans Téléchargements ou importez votre audio.")); exportSelectionCount();
+    const target = $("#export-selection"); target.replaceChildren(); const items = exportItems();
+    pageItems(items, "exports", target, renderExportSelection).items.forEach((item) => { const label = el("label", "export-check"), check = el("input"); check.type = "checkbox"; check.checked = state.exports.has(item.id); check.addEventListener("change", () => { check.checked ? state.exports.add(item.id) : state.exports.delete(item.id); exportSelectionCount(); }); const copy = el("span"); copy.append(el("strong", "", item.title), el("small", "muted", `${item.artist || "Artiste à préciser"} · ${duration(item.duration)}`)); label.append(check, copy); target.append(label); });
+    if (!items.length) target.append(el("p", "empty-inline", state.library.length ? "Aucun fichier pour cette recherche." : "Préparez d’abord les fichiers dans Téléchargements ou importez votre audio.")); exportSelectionCount();
   }
   function exportSelectionCount() {
     const count = state.exports.size; $("#export-selection-count").textContent = `${count} fichier${count > 1 ? "s" : ""} prêt${count > 1 ? "s" : ""} sélectionné${count > 1 ? "s" : ""}`;
@@ -244,7 +286,7 @@
   [["#dashboard-proposals-open", "proposals_open"], ["#dashboard-votes-open", "votes_open"], ["#dashboard-offline", "offline_mode"]].forEach(([selector, key]) => $(selector).addEventListener("change", async (event) => { const result = await work(event.currentTarget, () => api("/api/settings", { method: "PATCH", body: { [key]: event.target.checked } })); if (result) { state.settings = result; toast("Réglage enregistré."); } syncSettings(); }));
   $("#copy-public-url").addEventListener("click", (event) => work(event.currentTarget, async () => { if (!state.settings.public_url) throw new Error("Renseignez le lien public dans Réglages après la publication de GitHub Pages."); try { await navigator.clipboard.writeText(state.settings.public_url); toast("Lien public copié."); } catch { $("#dashboard-public-url").select(); toast("Copiez le lien sélectionné avec votre navigateur."); } }));
   $("#show-local-qr").addEventListener("click", () => { $("#admin-local-qr").src = "/api/qr?scope=local"; $("#qr-local-url").value = state.settings.local_url || "http://127.0.0.1:8000"; $("#qr-dialog").showModal(); });
-  $("#admin-proposal-query").addEventListener("input", renderProposals); $("#admin-proposal-state").addEventListener("change", renderProposals);
+  $("#admin-proposal-query").addEventListener("input", () => { state.pages["admin-proposals"] = 1; renderProposals(); }); $("#admin-proposal-state").addEventListener("change", () => { state.pages["admin-proposals"] = 1; renderProposals(); });
   $("#select-all-proposals").addEventListener("change", (event) => { selectableProposals().forEach((item) => event.target.checked ? state.selected.add(item.id) : state.selected.delete(item.id)); renderProposals(); });
   $("#select-visible").addEventListener("click", () => { selectableProposals().forEach((item) => state.selected.add(item.id)); renderProposals(); });
   $("#select-none").addEventListener("click", () => { state.selected.clear(); renderProposals(); });
@@ -253,7 +295,8 @@
   $("#export-selected-ready").addEventListener("click", () => work(null, () => openReadyExports(selectedReadySources())));
   $("#download-selected").addEventListener("click", async (event) => { const trigger = event.currentTarget, items = selectedProposals(), sources = selectedSources(); if (!sources.length) { feedback($("#admin-feedback"), "Associez d’abord un lien YouTube aux propositions sélectionnées avec Modifier.", "warning"); return; } if (!await confirmRights(`${sources.length} source(s) précise(s) sélectionnée(s). ${items.filter((item) => !item.url).length ? "Les demandes sans lien seront ignorées et restent à retrouver." : "Les fichiers déjà présents seront réutilisés."}`)) return; await work(trigger, async () => { const result = await api("/api/downloads", { method: "POST", body: { source_ids: sources, rights_confirmed: true } }); await navigate("downloads"); queueFeedback(result); }); });
   $("#edit-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const { item, kind } = state.editing, body = { title: $("#edit-title").value.trim(), artist: $("#edit-artist").value.trim() }; if (kind === "proposal") { if (!item.withdrawn_at) body.state = $("#edit-state").value; const url = $("#edit-url").value.trim(); if (url && url !== item.url) body.url = url; } const result = await api(`/api/${kind === "library" ? "library" : "proposals"}/${item.id}`, { method: "PATCH", body }); $("#edit-dialog").close(); toast("Morceau mis à jour."); if (result.warnings?.length) feedback($("#admin-feedback"), result.warnings.join(" "), "warning"); await (kind === "library" ? loadLibrary() : loadProposals()); }, $("#edit-feedback")); });
-  $("#open-merge").addEventListener("click", () => { const items = state.proposals.filter((item) => item.state !== "archived"); ["#merge-keep", "#merge-other"].forEach((selector) => { const select = $(selector); select.replaceChildren(); items.forEach((item) => { const option = el("option", "", `#${item.id} · ${item.title} · ${item.nickname || "Organisation"}`); option.value = item.id; select.append(option); }); }); if (items.length > 1) $("#merge-other").selectedIndex = 1; $("#merge-confirm").checked = false; feedback($("#merge-feedback"), ""); $("#merge-dialog").showModal(); });
+  $("#open-merge").addEventListener("click", () => { $("#merge-query").value = ""; renderMergeChoices(true); $("#merge-confirm").checked = false; feedback($("#merge-feedback"), ""); $("#merge-dialog").showModal(); });
+  $("#merge-query").addEventListener("input", () => renderMergeChoices());
   $("#merge-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { await api("/api/proposals/merge", { method: "POST", body: { keep_id: Number($("#merge-keep").value), merge_id: Number($("#merge-other").value), confirmed: $("#merge-confirm").checked } }); $("#merge-dialog").close(); await loadProposals(); toast("Propositions réunies, votes conservés."); }, $("#merge-feedback")); });
   $("#rights-confirm").addEventListener("change", (event) => { $("#rights-start").disabled = !event.target.checked; });
   $("#rights-start").addEventListener("click", () => { if (state.rightsResolve && $("#rights-confirm").checked) { const resolve = state.rightsResolve; state.rightsResolve = null; resolve(true); $("#rights-dialog").close(); } });
@@ -281,10 +324,11 @@
   $("#import-only").addEventListener("click", (event) => importAnalysis(false, event.currentTarget)); $("#import-download").addEventListener("click", (event) => importAnalysis(true, event.currentTarget));
   $("#queue-toggle").addEventListener("click", (event) => work(event.currentTarget, async () => { const result = await api("/api/queue", { method: "POST", body: { paused: !state.paused } }); toast(result.message); await loadJobs(); }));
   $("#retry-failed").addEventListener("click", async (event) => { const trigger = event.currentTarget; if (!await confirmRights("Relancer uniquement les téléchargements en échec. Les fichiers disponibles ne seront pas téléchargés à nouveau.")) return; await work(trigger, async () => { toast(queuedText(await api("/api/downloads/retry", { method: "POST", body: { rights_confirmed: true } }))); await loadJobs(); }); });
-  $("#library-query").addEventListener("input", renderLibrary);
+  $("#library-query").addEventListener("input", () => { state.pages.library = 1; renderLibrary(); });
+  $("#export-query").addEventListener("input", () => { state.pages.exports = 1; renderExportSelection(); });
   $("#open-audio-import").addEventListener("click", () => { $("#audio-import-form").reset(); feedback($("#audio-import-feedback"), ""); $("#audio-import-dialog").showModal(); });
   $("#audio-import-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const data = new FormData(); data.append("file", $("#audio-file").files[0]); data.append("title", $("#audio-title").value.trim()); data.append("artist", $("#audio-artist").value.trim()); feedback($("#audio-import-feedback"), "Copie et vérification du fichier…"); const result = await api("/api/library/import", { method: "POST", body: data }); if (result.item?.id) state.exports.add(result.item.id); $("#audio-import-dialog").close(); await loadLibrary(); toast("Votre fichier audio est disponible."); }, $("#audio-import-feedback")); });
-  $("#export-select-all").addEventListener("click", () => { state.library.forEach((item) => state.exports.add(item.id)); renderExportSelection(); }); $("#export-select-none").addEventListener("click", () => { state.exports.clear(); renderExportSelection(); });
+  $("#export-select-all").addEventListener("click", () => { exportItems().forEach((item) => state.exports.add(item.id)); renderExportSelection(); }); $("#export-select-none").addEventListener("click", () => { state.exports.clear(); renderExportSelection(); });
   $("#export-make-zip").addEventListener("change", exportSelectionCount);
   $("#prepare-export").addEventListener("click", (event) => work(event.currentTarget, async () => { feedback($("#export-result"), "Création et contrôle du pack…"); const result = await api("/api/exports", { method: "POST", body: { source_ids: Array.from(state.exports), make_zip: $("#export-make-zip").checked } }), target = $("#export-result"); target.replaceChildren(); target.append(el("p", "feedback success", `${result.count} fichier(s) prêt(s) dans le pack · ${size(result.size)}`)); if (result.directory) target.append(el("p", "export-path", `Dossier créé sur ce PC : ${result.directory}`)); (result.warnings || []).forEach((warning) => target.append(el("p", "feedback warning", warning))); if (result.download_url && result.download_url.startsWith("/api/exports/")) { const link = el("a", "button primary full-width", "Télécharger le ZIP sur cet appareil ↓"); link.href = result.download_url; link.download = ""; target.append(link); const share = button("Partager sur mon Wi-Fi", () => work(null, () => openTransfer(result.id)), "button subtle full-width"); share.id = "share-export"; target.append(share); } target.append(el("p", "field-help", "Votre navigateur enregistre le ZIP dans Téléchargements ou vous propose un dossier. Pour un téléphone ou une tablette, choisissez le partage Wi-Fi et scannez son QR code. Gardez audio/ et les playlists ensemble après extraction.")); }, $("#export-result")));
   $("#settings-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const body = {}; ["event_name", "public_url", "local_url", "output_format"].forEach((key) => { body[key] = $(`#setting-${key.replaceAll("_", "-")}`).value.trim(); }); ["max_proposals", "max_playlist_items"].forEach((key) => { body[key] = Number($(`#setting-${key.replaceAll("_", "-")}`).value); }); ["proposals_open", "votes_open", "offline_mode", "invitation_required"].forEach((key) => { body[key] = $(`#setting-${key.replaceAll("_", "-")}`).checked; }); state.settings = await api("/api/settings", { method: "PATCH", body }); syncSettings(); toast("Réglages enregistrés."); }); });
