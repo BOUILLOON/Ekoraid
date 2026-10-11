@@ -9,8 +9,8 @@ Résultats obtenus le **11 octobre 2026**, dans l’environnement Linux de déve
 | Audio local | Import d’un WAV silencieux généré pour le test, vérification par ffprobe, renommage avec accents, récupération du ZIP depuis le navigateur et contrôle des fichiers M3U8 UTF-8 utilisant des chemins relatifs. |
 | Installation et services Linux | Installation réutilisable, diagnostics et génération du site statique réussis. Démarrage, arrêt et redémarrage des services contrôlés ; commande d’arrêt et superviseur terminés avec le code **0**. |
 | Docker sous Linux | Image réellement construite, avec vérification TLS et sommes de contrôle conservées. Diagnostics et requêtes aux services invités/administrateur réussis dans un conteneur sans accès réseau extérieur, puis conteneur arrêté. |
-| Scripts Windows | Vérification syntaxique seulement. L’installation et le lancement sur Windows 11 restent à essayer sur le PC de l’organisateur. |
-| GitHub Pages | **Publication et vérification de la page publique en attente du résultat de la tâche principale.** |
+| Scripts Windows | Revue des scripts sans exécution PowerShell. L’installation et le lancement sur Windows 11 restent à essayer sur le PC de l’organisateur. |
+| GitHub Pages | **Construction et déploiement réussis** par le workflow [38156759298](https://github.com/BOUILLOON/Ekoraid/actions/runs/38156759298), commit `4e6c7b8`. L’API Pages confirme un site public, HTTPS obligatoire et source GitHub Actions à https://bouilloon.github.io/Ekoraid/. La lecture directe de cette URL depuis l’environnement Codex reste refusée par son proxy réseau (CONNECT 403 avant toute réponse du site) ; aucune vérification HTTP/navigateur à cette URL n’est revendiquée. |
 
 ## Parcours vérifiés dans le navigateur
 
@@ -75,6 +75,8 @@ La recherche réelle a notamment reçu « Dalida - Il venait d’avoir 18 ans »
 
 L’instance locale de préparation a aussi été réellement lancée avec sa configuration privée : connexion administrateur réussie, `POST /api/cloud/sync` HTTP **200** avec snapshot vide et compteurs à zéro, diagnostics HTTP **200**, puis arrêt propre. Cette synchronisation utilise la clé privilégiée **uniquement dans le backend local**. Les requêtes invité HTML/session/catalogue ont répondu HTTP **200** ; les routes privées d’administration, de cloud et `static/admin.js` ont répondu **404** sur le service invité.
 
+Le dossier exact `_site` destiné à Pages a été servi localement et contrôlé dans Chromium à **1 440 px et 390 px**, avec sa politique CSP et ses ressources publiques. Le formulaire de pseudo s’affiche, sans débordement ni erreur JavaScript. L’adaptateur du navigateur a reçu de **vraies réponses Supabase** : session HTTP 200, catalogue HTTP 200 vide et recherche « Dalida » HTTP 200 avec cinq résultats. Comme Chromium ne possédait pas le certificat de confiance du proxy de cet environnement, les seules requêtes au projet Supabase ont été transmises, sans modification de leur URL ou de leur contenu, par un transport Python/httpx utilisant le proxy normal et la vérification TLS active. Ce contrôle vérifie l’intégration de l’interface construite avec le backend réel ; il ne constitue pas une ouverture directe du domaine Pages. Aucune identité, proposition ni vote n’a été créé. Rapport et captures : dossier temporaire `playlist25-live-transport-*`.
+
 Ces résultats établissent le fonctionnement du fournisseur et des permissions au moment du contrôle. La disponibilité future des services gratuits reste à vérifier avant la soirée.
 
 ## Vérifications restantes sur votre matériel
@@ -83,6 +85,6 @@ Ces résultats établissent le fonctionnement du fournisseur et des permissions 
 - Utilisation sur un téléphone Android physique et sur le Wi-Fi de la salle.
 - Ouverture du pack dans Mixxx, déplacement du dossier complet et lecture avec le matériel audio prévu.
 - Préparation d’un fichier externe dont vous avez les autorisations : les essais réalisés n’ont téléchargé aucun audio YouTube réel.
-- Accès à l’adresse GitHub Pages publiée, puis essai de collecte avec le PC de préparation éteint.
+- Ouverture de l’adresse GitHub Pages publiée et essai de collecte avec le PC de préparation éteint ; le déploiement a réussi, mais le proxy de l’environnement de préparation a empêché sa lecture directe.
 
 Aucune lecture dans Mixxx, aucun essai Android physique et aucune installation Windows réelle ne sont revendiqués dans ce rapport. Le fonctionnement hors ligne de la soirée doit être confirmé avec les fichiers et le matériel retenus.

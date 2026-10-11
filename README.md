@@ -2,6 +2,8 @@
 
 Une application en français pour préparer une soirée : les invités proposent des musiques et votent ; l’organisateur choisit les bonnes versions, prépare les fichiers audio et exporte un dossier transportable pour Mixxx. L’ancien site PHP a été remplacé.
 
+**Site invités publié : https://bouilloon.github.io/Ekoraid/**. Le déploiement GitHub Pages a réussi le 11 octobre 2026 ; Supabase et la recherche YouTube ont été vérifiés en ligne. Votre PC peut rester éteint pendant la collecte. L’installation ci-dessous sert à votre administration privée et à la préparation des fichiers audio.
+
 ## Deux usages
 
 **Collecter sans laisser votre PC allumé : GitHub Pages + Supabase gratuit.** Pages sert l’interface ; Supabase conserve les propositions et les votes. La recherche propose de vrais résultats YouTube pendant la saisie, avec choix explicite de la version. Si le fournisseur ne répond pas, le lien ou la demande textuelle reste utilisable. Il faut créer un projet Supabase et configurer le site : [guide de publication gratuit](cloud/README.md). Les quotas et conditions des offres gratuites peuvent évoluer ; le projet ne requiert aucun abonnement ni API payante. Aucun déploiement n’est créé par la simple installation locale.

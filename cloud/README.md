@@ -2,7 +2,9 @@
 
 GitHub Pages sert l’interface invités ; Supabase conserve les propositions et les votes. **Votre PC peut être éteint pendant la collecte.** L’administration, les téléchargements et le pack Mixxx restent sur votre PC. Le jour de la soirée, utilisez les fichiers du pack : le site Internet public a besoin d’Internet.
 
-Le projet choisi est `https://dpcohlyczczaqovblzin.supabase.co`. Sa configuration **publique** est dans `cloud/public-config.json`. Le SQL et la fonction de recherche ont été déployés sur ce projet et vérifiés le 11 octobre 2026. La publication de l’interface GitHub Pages est une étape distincte ; vérifiez son lien réel avant de le partager. Les étapes ci-dessous permettent de reproduire le déploiement.
+Le site invités est publié à **https://bouilloon.github.io/Ekoraid/**. Le workflow [de publication](https://github.com/BOUILLOON/Ekoraid/actions/runs/38156759298) a terminé avec succès le 11 octobre 2026, après activation de la source **GitHub Actions** dans Pages. Les étapes ci-dessous permettent de reproduire le déploiement.
+
+Le projet choisi est `https://dpcohlyczczaqovblzin.supabase.co`. Sa configuration **publique** est dans `cloud/public-config.json`. Le SQL et la fonction de recherche ont été déployés sur ce projet et vérifiés en ligne. Le rapport [de validation](../docs/VALIDATION.md) distingue ces contrôles du déploiement Pages et des essais locaux.
 
 ## 1. Préparer Supabase
 
