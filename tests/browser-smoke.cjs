@@ -419,9 +419,22 @@ with wave.open(str(Path(cfg.data_dir)/'Silence autorisé.wav'),'wb') as wav:
   checked('Lecteur mobile ouvert uniquement à la demande et fermé sans connexion musicale réelle');
   await guest.locator('#search-form button[type="submit"]').click();
   await guest.locator('.search-result').waitFor();
-  await guest.locator('.search-result button').filter({ hasText: 'Ajouter ce morceau' }).click();
-  await guest.locator('#entry-feedback').filter({ hasText: 'déjà' }).waitFor();
-  checked('Recherche simulée et même source proposée sous un autre lien sans doublon');
+  assert.match(await guest.locator('.search-result .existing-tag').innerText(), /Déjà dans la playlist/);
+  assert.equal(await guest.locator('.search-result button').filter({ hasText: 'Ajouter ce morceau' }).count(), 0);
+  const duplicateAdds = [];
+  const recordDuplicateAdd = request => { if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/proposals') duplicateAdds.push(request.postDataJSON()); };
+  guest.on('request', recordDuplicateAdd);
+  await guest.locator('.search-result [data-existing-vote-id]').click();
+  await guest.locator('.search-result [data-existing-vote-id]').filter({ hasText: 'Vote enregistré' }).waitFor();
+  assert.equal(await guest.locator('.search-result [data-existing-vote-id]').isDisabled(), true);
+  await guest.locator('.search-result [data-locate-id]').click();
+  await guest.locator('.track-highlight').waitFor();
+  await guest.locator('#tab-link').click(); await guest.locator('#link-input').fill('https://m.youtube.com/watch?v=abcdefghijk&t=12');
+  await guest.locator('#link-existing-feedback [data-locate-id]').waitFor();
+  assert.equal(await guest.locator('#link-form button[type="submit"]').isDisabled(), true);
+  assert.equal(await guest.locator('#link-existing-feedback [data-existing-vote-id]').isDisabled(), true);
+  guest.off('request', recordDuplicateAdd); assert.deepEqual(duplicateAdds, []);
+  checked('Recherche et lien canonique signalent le morceau existant avant ajout, retrouvent sa carte et proposent un vote unique sans POST de proposition');
   await navigate(admin, 'proposals');
   await admin.locator('#admin-proposals tr').filter({ hasText: 'Deuxième navigateur' }).waitFor();
   await admin.locator('#select-all-proposals').check();
@@ -607,6 +620,75 @@ with wave.open(str(Path(cfg.data_dir)/'Silence autorisé.wav'),'wb') as wav:
   assert.equal(await guest.locator('#stat-duration-note').innerText(), '6 à compléter, dont 2 playlists à analyser');
   await navigate(admin, 'dashboard'); await admin.locator('#dashboard-stats .stat-card').nth(3).locator('strong').filter({ hasText: 'À compléter' }).waitFor();
   checked('Invités et studio affichent À compléter quand aucune durée n’est connue, sans présenter une playlist non analysée comme zéro minute');
+
+  await guest.locator('#tab-manual').click();
+  await guest.locator('#manual-title').fill('Une idée accentuée été'); await guest.locator('#manual-artist').fill('Artiste test');
+  await guest.locator('#manual-existing-feedback [data-locate-id]').waitFor();
+  assert.equal(await guest.locator('#manual-form button[type="submit"]').isDisabled(), true);
+  await guest.locator('#manual-artist').fill('Un autre artiste');
+  assert.equal(await guest.locator('#manual-form button[type="submit"]').isEnabled(), true);
+  assert.equal(await guest.locator('#manual-existing-feedback [data-locate-id]').count(), 0);
+  checked('Une idée manuelle identique est repérée, tandis que le même titre d’un autre artiste reste ajoutable');
+  await guest.locator('#manual-title').fill('Lien YouTube de test'); await guest.locator('#manual-artist').fill('');
+  await guest.locator('#manual-form button[type="submit"]').click();
+  await guest.locator('#manual-match-dialog').waitFor({ state: 'visible' });
+  await noOverflow(guest, 'Choix explicite d’une autre version bureau');
+  await guest.locator('#manual-match-cancel').click();
+  await guest.locator('#manual-match-dialog').waitFor({ state: 'hidden' });
+  await guest.locator('#entry-feedback').filter({ hasText: 'Ajout annulé' }).waitFor();
+  checked('Un titre manuel correspondant à une vidéo demande un choix explicite, et annuler conserve la playlist');
+
+  await guest.locator('#tab-link').click(); await guest.locator('#link-input').fill(publicPlaylist.url);
+  await guest.locator('#link-existing-feedback [data-locate-id]').waitFor();
+  assert.equal(await guest.locator('#link-form button[type="submit"]').isDisabled(), true);
+  checked('Une playlist entière déjà proposée est détectée avant l’ajout, indépendamment de ses vidéos');
+
+  // A second guest adds the same source after the UI's fresh snapshot and before
+  // its POST. Both writes use the actual disposable API, not a mocked response.
+  const mobileSession = await guestSnapshot(mobileContext, guestUrl), racingUrl = 'https://www.youtube.com/watch?v=cdefghijklm';
+  let racingProposal;
+  await guest.route('**/api/proposals', async route => {
+    const request = route.request();
+    if (request.method() === 'POST' && request.postDataJSON()?.url === racingUrl) {
+      const inserted = await mobileContext.request.post(`${guestUrl}/api/proposals`, { headers: { 'X-CSRF-Token': mobileSession.csrf_token }, data: { kind: 'youtube', url: racingUrl } });
+      assert.equal(inserted.status(), 200); racingProposal = (await inserted.json()).item;
+    }
+    await route.continue();
+  });
+  await guest.locator('#link-input').fill(racingUrl);
+  const racingResponse = guest.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/proposals');
+  await guest.locator('#link-form button[type="submit"]').click();
+  const racingResult = await (await racingResponse).json();
+  assert.equal(racingResult.duplicate.id, racingProposal.id);
+  await guest.locator(`#entry-feedback [data-locate-id="${racingProposal.id}"]`).waitFor();
+  assert.equal(await guest.locator('#link-form button[type="submit"]').isDisabled(), true);
+  await guest.unroute('**/api/proposals');
+  const raceItems = (await (await desktop.request.get(`${guestUrl}/api/proposals`)).json()).items;
+  assert.equal(raceItems.filter(item => item.video_id === 'cdefghijklm').length, 1);
+  checked('Une course entre deux vrais invités conserve une seule proposition et offre Retrouver et Voter via la réponse du serveur');
+
+  const otherVersion = await addYoutubeLink(guest, 'https://youtu.be/defghijklmn');
+  assert.equal(otherVersion.title, racingProposal.title); assert.notEqual(otherVersion.video_id, racingProposal.video_id);
+  await guest.locator(`[data-withdraw-id="${otherVersion.id}"]`).click(); await guest.locator('#withdraw-confirm').click();
+  await guest.locator('#withdraw-dialog').waitFor({ state: 'hidden' });
+  const proposedAgain = await addYoutubeLink(guest, 'https://www.youtube.com/watch?v=defghijklmn');
+  assert.notEqual(proposedAgain.id, otherVersion.id); assert.equal(proposedAgain.source_id, otherVersion.source_id);
+  checked('Deux vidéos au même titre restent distinctes, et retirer sa proposition permet de reproposer la même source');
+
+  execFileSync(python, ['-c', `import sys\nfrom playlist25.config import load_settings\nfrom playlist25 import db\nwith db.connect(load_settings()) as conn:\n for index in range(55):\n  source=conn.execute("INSERT INTO sources(title,artist,created_at) VALUES(?,'Pagination test',?)",('Proposition de pagination '+str(index),db.now())).lastrowid\n  conn.execute("INSERT INTO proposals(source_id,guest_id,state,created_at) VALUES(?,?,'pending',?)",(source,sys.argv[1],db.now()))\n conn.commit()`, mobileGuest.id], { cwd: root, env });
+  await guest.locator('#refresh-proposals').click(); await guest.locator('#catalogue-sort').selectOption('recent');
+  await guest.locator('#filter-mine').click(); await guest.locator('#catalogue-query').fill('Aucun résultat pour ce texte');
+  await guest.locator('#link-input').fill(chosenVideo.url); await guest.locator(`#link-existing-feedback [data-locate-id="${chosenVideo.id}"]`).click();
+  await guest.locator(`[data-proposal-id="${chosenVideo.id}"].track-highlight`).waitFor();
+  assert.equal(await guest.locator('#catalogue-query').inputValue(), '');
+  assert.match(await guest.locator('#filter-all').getAttribute('class'), /active/);
+  assert.equal(await guest.locator('#proposal-page-label').innerText(), 'Page 2 sur 2');
+  assert.ok(await guest.locator('.track-card').count() <= 48);
+  checked('Retrouver un doublon recherche toute la collection, rétablit les filtres et ouvre la bonne page sans rendre tous les morceaux');
+  await screenshot(guest, 'guest-desktop-existing-link');
+  await mobile.locator('#refresh-proposals').click(); await mobile.locator('#tab-link').click(); await mobile.locator('#link-input').fill(chosenVideo.url);
+  await mobile.locator('#link-existing-feedback [data-locate-id]').waitFor();
+  await noOverflow(mobile, 'Avertissement de doublon mobile 390 px'); await screenshot(mobile, 'guest-mobile-existing-link');
 
   await navigate(admin, 'settings');
   await admin.locator('#diagnostics-list .diagnostic-row').first().waitFor();

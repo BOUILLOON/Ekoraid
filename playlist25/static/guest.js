@@ -2,8 +2,9 @@
 
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, withdrawing: null, withdrawalPending: false, profileSerial: 0, profileAvatar: "", profileDirty: false, profileProcessing: false, profilePending: false, proposalScopeResolve: null };
+  const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, searchItems: [], catalogueSerial: 0, linkCheckTimer: null, lastCheckedLink: "", proposalPending: false, manualMatchResolve: null, withdrawing: null, withdrawalPending: false, profileSerial: 0, profileAvatar: "", profileDirty: false, profileProcessing: false, profilePending: false, proposalScopeResolve: null };
   const PAGE_SIZE = 48;
+  const sourceMatches = new Map(), manualMatches = new Map();
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
     const node = document.createElement(tag);
@@ -229,6 +230,104 @@
     if (state.session?.settings?.offline_mode) { button.disabled = true; button.textContent = "Écoute indisponible hors ligne"; button.title = "Un accès à Internet est nécessaire pour écouter une vidéo YouTube."; }
     return button;
   }
+  function youtubeSource(value, mode) {
+    if (typeof value !== "string" || value.length > 2048 || /[\x00-\x1f\x7f\\]/.test(value)) return null;
+    try {
+      const url = new URL(value.trim()), host = url.hostname;
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port || !["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"].includes(host)) return null;
+      if (["v", "list"].some((key) => url.searchParams.getAll(key).length > 1)) return null;
+      let video = null; const playlist = url.searchParams.get("list");
+      if (["youtu.be", "www.youtu.be"].includes(host)) video = /^\/([A-Za-z0-9_-]{11})\/?$/.exec(url.pathname)?.[1];
+      else if (["/watch", "/watch/"].includes(url.pathname)) video = url.searchParams.get("v");
+      else if (["/playlist", "/playlist/"].includes(url.pathname)) { if (url.searchParams.has("v")) return null; }
+      else video = /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/.exec(url.pathname)?.[1];
+      if (video !== null && !/^[A-Za-z0-9_-]{11}$/.test(video || "")) return null;
+      if (playlist !== null && (!/^[A-Za-z0-9_-]{10,150}$/.test(playlist) || /^(RD|UL|UU)/.test(playlist))) return null;
+      if (!video && !playlist || mode === "video" && !video || mode === "playlist" && !playlist) return null;
+      const kind = mode || (video && playlist ? "choice" : video ? "video" : "playlist");
+      return { kind, video, playlist, key: kind === "video" ? `video:${video}` : kind === "playlist" ? `playlist:${playlist}` : null };
+    } catch { return null; }
+  }
+  const normalText = (value) => (value || "").toLocaleLowerCase("fr").normalize("NFKD").replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
+  const manualKey = (title, artist) => JSON.stringify([normalText(title), normalText(artist)]);
+  const exactText = (value) => (value || "").trim().toLocaleLowerCase("fr").replace(/\s+/g, " ");
+  const exactManualMatch = (item, title, artist) => !item.url && !item.video_id && exactText(item.title) === exactText(title) && exactText(item.artist) === exactText(artist);
+  function rebuildMatches() {
+    sourceMatches.clear(); manualMatches.clear();
+    state.items.forEach((item) => {
+      const video = youtubeVideoId(item), source = video ? { key: `video:${video}` } : youtubeSource(item.url);
+      if (source?.key) {
+        const previous = sourceMatches.get(source.key);
+        if (!previous || item.voted && !previous.voted || !!item.voted === !!previous.voted && Number(item.votes || 0) > Number(previous.votes || 0)) sourceMatches.set(source.key, item);
+      }
+      if (item.source_kind !== "playlist" && normalText(item.title)) { const key = manualKey(item.title, item.artist), matches = manualMatches.get(key) || []; matches.push(item); manualMatches.set(key, matches); }
+    });
+  }
+  function existingSource(body) { const source = youtubeSource(body.url, body.mode); return source?.key ? sourceMatches.get(source.key) : null; }
+  function existingLabel(item) {
+    if (item.status === "available") return "Déjà dans la playlist · fichier prêt";
+    if (["queued", "downloading", "converting", "verifying"].includes(item.status)) return "Déjà dans la playlist · en préparation";
+    return "Déjà dans la playlist";
+  }
+  function filteredProposals() {
+    const query = state.query.trim().toLocaleLowerCase("fr");
+    return state.items.filter((item) => (!state.mine || item.mine === true) && [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)))
+      .sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
+  }
+  function locateProposal(item) {
+    if ($("#manual-match-dialog").open) $("#manual-match-dialog").close();
+    state.mine = false; state.query = ""; $("#catalogue-query").value = "";
+    const index = filteredProposals().findIndex((candidate) => candidate.id === item.id);
+    if (index < 0) { toast("Cette proposition n’est plus dans la playlist. Actualisez pour vérifier."); return; }
+    state.page = Math.floor(index / PAGE_SIZE) + 1; renderProposals();
+    const card = Array.from(document.querySelectorAll("[data-proposal-id]")).find((node) => node.dataset.proposalId === String(item.id));
+    if (card) { card.classList.add("track-highlight"); card.focus({ preventScroll: true }); card.scrollIntoView({ block: "center", behavior: "smooth" }); window.setTimeout(() => card.classList.remove("track-highlight"), 4500); }
+  }
+  function existingActions(item) {
+    const actions = el("div", "button-row existing-actions"), locate = el("button", "button subtle small", "Retrouver ce morceau →");
+    locate.type = "button"; locate.dataset.locateId = String(item.id); locate.addEventListener("click", () => locateProposal(item));
+    const vote = el("button", "button primary small", item.voted ? "Vote enregistré ♥" : "Voter pour ce morceau ♡");
+    vote.type = "button"; vote.dataset.existingVoteId = String(item.id); vote.disabled = !!item.voted || state.session?.settings?.votes_open === false;
+    if (state.session?.settings?.votes_open === false) vote.textContent = "Votes fermés";
+    vote.addEventListener("click", () => voteFor(item, vote)); actions.append(locate, vote); return actions;
+  }
+  function showExisting(target, item, text) {
+    message(target, text || `${existingLabel(item)}. Inutile de l’ajouter deux fois : retrouvez-le ou votez pour lui.`);
+    target.append(el("p", "existing-title", `${item.title || "Morceau proposé"}${item.nickname ? ` · proposé par ${item.nickname}` : ""}`), existingActions(item));
+  }
+  function refreshEntryMatches() {
+    const link = youtubeSource($("#link-input").value), existing = link?.key ? sourceMatches.get(link.key) : null;
+    $("#link-form button[type=submit]").disabled = state.proposalPending || !!existing;
+    if (existing) showExisting($("#link-existing-feedback"), existing);
+    else if (link?.kind === "choice" && (sourceMatches.has(`video:${link.video}`) || sourceMatches.has(`playlist:${link.playlist}`))) message($("#link-existing-feedback"), "Ce morceau ou cette playlist existe déjà. Choisissez ce que vous souhaitez proposer : nous vérifierons votre choix.");
+    else message($("#link-existing-feedback"), "");
+    const matches = manualMatches.get(manualKey($("#manual-title").value, $("#manual-artist").value)) || [], exactManual = matches.find((item) => exactManualMatch(item, $("#manual-title").value, $("#manual-artist").value));
+    $("#manual-form button[type=submit]").disabled = state.proposalPending || !!exactManual;
+    if (exactManual) showExisting($("#manual-existing-feedback"), exactManual, "Cette idée avec le même titre et le même artiste est déjà proposée. Retrouvez-la ou votez pour elle.");
+    else if (matches.length) showExisting($("#manual-existing-feedback"), matches[0], "Un morceau avec ce titre et cet artiste existe déjà. Vérifiez sa version avant d’ajouter votre idée.");
+    else message($("#manual-existing-feedback"), "");
+  }
+  function renderSearchResults() {
+    const results = $("#search-results"); results.replaceChildren();
+    state.searchItems.forEach((item) => {
+      const row = el("article", "search-result"), image = el("img"); image.src = "./static/placeholder.svg"; image.alt = "";
+      const description = el("div", "search-result-text"); description.append(el("h3", "", item.title), el("p", "muted", `${item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste non renseigné")} · ${duration(item.duration)}`));
+      const source = el("a", "result-source", "Voir sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer";
+      if (/^https:\/\/(www\.)?youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(item.url || "")) description.append(source);
+      const actions = el("div", "search-result-actions"), preview = previewButton(item), existing = existingSource(item);
+      if (preview) actions.append(preview);
+      if (existing) { description.append(el("span", "mini-tag existing-tag", existingLabel(existing))); actions.append(existingActions(existing)); }
+      else { const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.disabled = state.proposalPending; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); actions.append(add); }
+      row.append(image, description, actions); results.append(row);
+    });
+  }
+  function chooseManualVersion(matches) {
+    const list = $("#manual-match-list"); list.replaceChildren();
+    matches.slice(0, 3).forEach((item) => { const row = el("div", "manual-match-row"); row.append(el("strong", "", item.title), el("p", "muted", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")), existingActions(item)); list.append(row); });
+    if (matches.length > 3) list.append(el("p", "muted", `${matches.length - 3} autre(s) proposition(s) avec ce titre et cet artiste dans la playlist.`));
+    $("#manual-match-dialog").showModal(); $("#manual-match-cancel").focus();
+    return new Promise((resolve) => { state.manualMatchResolve = resolve; });
+  }
   function showIdentity() { $("#nickname-input").value = state.session?.guest?.nickname || ""; $("#identity-dialog").showModal(); window.setTimeout(() => $("#nickname-input").focus(), 20); }
   async function ensureIdentity() {
     if (state.session?.guest) return true;
@@ -270,7 +369,7 @@
     document.querySelectorAll("[data-entry]").forEach((tab) => { const active = tab.dataset.entry === name; tab.classList.toggle("active", active); tab.setAttribute("aria-selected", String(active)); tab.tabIndex = active ? 0 : -1; });
     ["search", "link", "manual"].forEach((mode) => $(`#${mode}-form`).classList.toggle("hidden", name !== mode));
     message($("#entry-feedback"), "");
-    $("#search-results").replaceChildren();
+    state.searchItems = []; $("#search-results").replaceChildren(); refreshEntryMatches();
   }
   function youtubeFallback(query) {
     const actions = el("div", "button-row search-fallback");
@@ -283,21 +382,12 @@
     if (query.length < 3) { message(target, "Écrivez au moins 3 caractères pour trouver des morceaux."); return; }
     if (cloud()?.searchSupported === false) { message(target, "La recherche intégrée n’est pas disponible. Ouvrez YouTube pour choisir votre morceau, puis collez son lien ici."); youtubeFallback(query); return; }
     state.searchController?.abort(); state.searchController = new AbortController(); submit.disabled = true;
-    results.replaceChildren(); message(target, "On cherche les morceaux disponibles…");
+    state.searchItems = []; results.replaceChildren(); message(target, "On cherche les morceaux disponibles…");
     try {
       const data = await api(`/api/search?q=${encodeURIComponent(query)}`, { signal: state.searchController.signal });
       if (serial !== state.searchSerial) return;
-      message(target, data.items?.length ? "Cliquez sur « Ajouter » à côté de votre morceau. Vérifiez la version : original, live ou remix." : "Aucun résultat disponible. Vous pouvez proposer le titre manuellement.");
-      (data.items || []).forEach((item) => {
-        const row = el("article", "search-result"); const image = el("img"); image.src = "./static/placeholder.svg"; image.alt = "";
-        const description = el("div", "search-result-text"); description.append(el("h3", "", item.title), el("p", "muted", `${item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste non renseigné")} · ${duration(item.duration)}`));
-        const source = el("a", "result-source", "Voir sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer";
-        // Source links come from the server’s canonical YouTube parser, never an arbitrary thumbnail URL.
-        if (/^https:\/\/(www\.)?youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(item.url || "")) description.append(source);
-        const actions = el("div", "search-result-actions"), preview = previewButton(item);
-        if (preview) actions.append(preview);
-        const add = el("button", "button primary small", "Ajouter ce morceau ＋"); add.type = "button"; add.addEventListener("click", () => submitProposal({ kind: "youtube", url: item.url, title: item.title, artist: item.artist || "" }, add)); actions.append(add); row.append(image, description, actions); results.append(row);
-      });
+      message(target, data.items?.length ? "Choisissez votre version : original, live ou remix. Si elle est déjà proposée, retrouvez-la ou votez pour elle." : "Aucun résultat disponible. Vous pouvez proposer le titre manuellement.");
+      state.searchItems = data.items || []; renderSearchResults();
       if (!data.items?.length) youtubeFallback(query);
     } catch (error) {
       if (serial !== state.searchSerial || error.name === "AbortError") return;
@@ -305,24 +395,27 @@
     } finally { if (serial === state.searchSerial) submit.disabled = !!state.session?.settings?.offline_mode; }
   }
   function chooseProposalScope() { $("#proposal-scope-dialog").showModal(); return new Promise((resolve) => { state.proposalScopeResolve = resolve; }); }
-  function ambiguousYoutubeLink(value) {
-    try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.port && ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(url.hostname) && url.pathname === "/watch" && url.searchParams.getAll("v").length === 1 && url.searchParams.getAll("list").length === 1 && /^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") || "") && /^[A-Za-z0-9_-]{10,200}$/.test(url.searchParams.get("list") || ""); }
-    catch { return false; }
-  }
+  function ambiguousYoutubeLink(value) { return youtubeSource(value)?.kind === "choice"; }
   async function submitProposal(body, button) {
-    if (!await ensureIdentity()) return;
+    if (state.proposalPending) return;
     if (body.kind === "youtube" && !body.mode && ambiguousYoutubeLink(body.url)) { const mode = await chooseProposalScope(); if (!mode) { message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); return; } body = { ...body, mode }; }
-    button.disabled = true;
-    message($("#entry-feedback"), "Ajout du morceau…");
+    state.proposalPending = true; button.disabled = true; refreshEntryMatches();
+    message($("#entry-feedback"), "Vérification de la playlist…");
     try {
+      // A fresh snapshot catches ideas added by another guest since the last refresh.
+      // The server still decides duplicates atomically if an addition races this check.
+      try { await loadProposals(); } catch { /* Submission retains the normal server validation when a refresh fails. */ }
+      const matches = body.kind === "manual" ? manualMatches.get(manualKey(body.title, body.artist)) || [] : [];
+      const existing = body.kind === "manual" ? matches.find((item) => exactManualMatch(item, body.title, body.artist)) : existingSource(body);
+      if (existing) { showExisting($("#entry-feedback"), existing); return; }
+      if (matches.length && !await chooseManualVersion(matches)) { message($("#entry-feedback"), "Ajout annulé. Le morceau existant reste dans la playlist."); return; }
+      if (!await ensureIdentity()) return;
+      message($("#entry-feedback"), "Ajout du morceau…");
       const data = await api("/api/proposals", { method: "POST", body });
       if (data.duplicate) {
-        message($("#entry-feedback"), data.message || "Ce morceau est déjà dans la playlist. Donnez-lui un vote plutôt que de le proposer deux fois.", "info");
         const duplicate = typeof data.duplicate === "object" ? data.duplicate : data.item;
-        if (duplicate?.id) {
-          const vote = el("button", "button subtle small", "Voter pour ce morceau ♡"); vote.type = "button";
-          vote.addEventListener("click", () => voteFor(duplicate, vote)); $("#entry-feedback").append(vote);
-        }
+        if (duplicate?.id) showExisting($("#entry-feedback"), duplicate, data.message);
+        else message($("#entry-feedback"), data.message || "Ce morceau est déjà proposé. Retrouvez-le dans la playlist pour voter.");
       } else {
         const detail = Array.isArray(data.similar) && data.similar.length ? " Un titre proche existe déjà ; l’organisation vérifiera les versions." : "";
         message($("#entry-feedback"), (data.message || "Votre idée est dans la playlist. Merci !") + detail, "success");
@@ -332,10 +425,10 @@
       }
       await loadProposals();
     } catch (error) {
-      if (error.detail?.need_choice && !body.mode) { const mode = await chooseProposalScope(); if (mode) await submitProposal({ ...body, mode }, button); else message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); }
+      if (error.detail?.need_choice && !body.mode) { const mode = await chooseProposalScope(); if (mode) { state.proposalPending = false; await submitProposal({ ...body, mode }, button); } else message($("#entry-feedback"), "Ajout annulé. Vous pouvez choisir un autre lien."); }
       else message($("#entry-feedback"), error.message, "error");
     }
-    finally { button.disabled = false; }
+    finally { state.proposalPending = false; button.disabled = false; refreshEntryMatches(); renderSearchResults(); }
   }
   async function voteFor(item, button) {
     if (!await ensureIdentity()) return;
@@ -345,10 +438,13 @@
       const found = state.items.find((track) => track.id === item.id);
       if (found) { found.votes = result.votes; found.voted = result.voted; }
       item.votes = result.votes; item.voted = result.voted;
-      renderProposals();
+      renderProposals(); refreshEntryMatches(); renderSearchResults();
       toast(result.voted ? "Votre vote est enregistré ♡" : "Votre vote a été retiré.");
     } catch (error) { toast(error.message); }
-    finally { button.disabled = false; }
+    finally {
+      button.disabled = button.dataset.existingVoteId ? !!item.voted || state.session?.settings?.votes_open === false : false;
+      if (button.dataset.existingVoteId) button.textContent = state.session?.settings?.votes_open === false ? "Votes fermés" : item.voted ? "Vote enregistré ♥" : "Voter pour ce morceau ♡";
+    }
   }
   function requestWithdrawal(item) {
     if (item.mine !== true) return;
@@ -390,8 +486,7 @@
   function renderProposals() {
     const query = state.query.trim().toLocaleLowerCase("fr");
     const mine = state.items.filter((item) => item.mine === true);
-    let items = (state.mine ? mine : state.items).filter((item) => [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)));
-    items = items.slice().sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
+    const items = filteredProposals();
     const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     state.page = Math.min(pages, Math.max(1, state.page));
     const first = (state.page - 1) * PAGE_SIZE;
@@ -410,7 +505,7 @@
     const list = $("#proposal-list"); list.replaceChildren();
     items.slice(first, first + PAGE_SIZE).forEach((item, localIndex) => {
       const index = first + localIndex;
-      const card = el("article", "track-card");
+      const card = el("article", "track-card"); card.dataset.proposalId = String(item.id); card.tabIndex = -1;
       const visual = el("div", `track-art track-art-${index % 4}`); const image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; image.loading = "lazy"; visual.append(image, el("span", "track-number", String(index + 1).padStart(2, "0")));
       const content = el("div", "track-content"); content.append(el("h3", "track-title", item.title || "Titre à retrouver"));
       content.append(el("p", "track-artist", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")));
@@ -439,9 +534,12 @@
     $("#catalogue-empty").classList.toggle("hidden", items.length > 0);
     $("#catalogue-empty h3").textContent = state.items.length ? "Aucun morceau pour cette recherche." : "Le premier morceau, c’est peut-être le vôtre.";
     $("#catalogue-empty p").textContent = state.mine ? "Vos propositions apparaîtront ici après votre premier ajout." : query ? "Essayez un autre titre, un artiste ou un pseudo." : "Ajoutez une idée pour lancer la playlist.";
+    rebuildMatches(); refreshEntryMatches(); renderSearchResults();
   }
   async function loadProposals() {
+    const serial = ++state.catalogueSerial;
     const data = await api("/api/proposals?sort=popular");
+    if (serial !== state.catalogueSerial) return;
     state.items = data.items || [];
     // Only the server’s boolean marker grants owner actions; nicknames are display names.
     renderProposals();
@@ -470,6 +568,9 @@
   $("#organisation-button").addEventListener("click", () => $("#organisation-dialog").showModal());
   [["#proposal-choice-video", "video"], ["#proposal-choice-playlist", "playlist"]].forEach(([selector, mode]) => $(selector).addEventListener("click", () => { const resolve = state.proposalScopeResolve; state.proposalScopeResolve = null; resolve?.(mode); $("#proposal-scope-dialog").close(); }));
   $("#proposal-scope-dialog").addEventListener("close", () => { state.proposalScopeResolve?.(null); state.proposalScopeResolve = null; });
+  $("#manual-match-confirm").addEventListener("click", () => { const resolve = state.manualMatchResolve; state.manualMatchResolve = null; resolve?.(true); $("#manual-match-dialog").close(); });
+  $("#manual-match-cancel").addEventListener("click", () => $("#manual-match-dialog").close());
+  $("#manual-match-dialog").addEventListener("close", () => { state.manualMatchResolve?.(false); state.manualMatchResolve = null; });
   $("#preview-dialog").addEventListener("close", clearPreview);
   $("#preview-dialog").addEventListener("cancel", clearPreview);
   $("#identity-form").addEventListener("submit", async (event) => {
@@ -483,9 +584,17 @@
   });
   $("#manual-form").addEventListener("submit", (event) => { event.preventDefault(); submitProposal({ kind: "manual", title: $("#manual-title").value.trim(), artist: $("#manual-artist").value.trim() }, event.submitter); });
   $("#link-form").addEventListener("submit", (event) => { event.preventDefault(); submitProposal({ kind: "youtube", url: $("#link-input").value.trim() }, event.submitter); });
+  $("#link-input").addEventListener("input", () => {
+    window.clearTimeout(state.linkCheckTimer); refreshEntryMatches();
+    const value = $("#link-input").value.trim();
+    if (value === state.lastCheckedLink || !youtubeSource(value)) return;
+    state.linkCheckTimer = window.setTimeout(async () => { state.lastCheckedLink = value; try { await loadProposals(); } catch { /* The existing snapshot and server duplicate protection remain available. */ } }, 550);
+  });
+  ["#manual-title", "#manual-artist"].forEach((selector) => $(selector).addEventListener("input", refreshEntryMatches));
   $("#search-form").addEventListener("submit", (event) => { event.preventDefault(); window.clearTimeout(state.searchTimer); searchMusic($("#search-input").value.trim(), ++state.searchSerial); });
   $("#search-input").addEventListener("input", (event) => {
     window.clearTimeout(state.searchTimer); state.searchController?.abort(); const serial = ++state.searchSerial, query = event.target.value.trim();
+    state.searchItems = []; $("#search-results").replaceChildren();
     $("#search-form button").disabled = !!state.session?.settings?.offline_mode;
     if (query.length < 3) { $("#search-results").replaceChildren(); message($("#entry-feedback"), ""); return; }
     state.searchTimer = window.setTimeout(() => searchMusic(query, serial), 800);

@@ -4,6 +4,8 @@ Une application en français pour les **25 ans de Fanny, le 17 octobre 2026 dès
 
 **Site invités publié : https://bouilloon.github.io/Ekoraid/**. Le déploiement GitHub Pages a réussi le 11 octobre 2026 ; Supabase et la recherche YouTube ont été vérifiés en ligne. Votre PC peut rester éteint pendant la collecte. L’installation ci-dessous sert à votre administration privée et à la préparation des fichiers audio.
 
+Les [pistes d’amélioration](docs/AMELIORATIONS.md) présentent les prochaines évolutions proposées pour les invités, l’organisation et la soirée.
+
 ## Deux usages
 
 **Collecter sans laisser votre PC allumé : GitHub Pages + Supabase gratuit.** Pages sert l’interface ; Supabase conserve les propositions et les votes. Le site de Fanny est déjà configuré à l’adresse ci-dessus. La recherche propose de vrais résultats YouTube pendant la saisie, avec choix explicite de la version. Si le fournisseur ne répond pas, le lien ou la demande textuelle reste utilisable. Le [guide de publication gratuit](cloud/README.md) permet de reproduire ce déploiement pour un autre projet. Les quotas et conditions des offres gratuites peuvent évoluer ; le projet ne requiert aucun abonnement ni API payante.
