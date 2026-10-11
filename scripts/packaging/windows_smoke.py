@@ -41,11 +41,29 @@ def request_json(opener, url, *, data=None, csrf=None):
         return json.load(response)
 
 
-def wait_ready(process, url, surface, opener):
+def log_tail(log_path: Path | None, limit=8000) -> str:
+    """Read a bounded local fixture log before its temporary directory closes."""
+    if log_path is None:
+        return ""
+    try:
+        with log_path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - limit))
+            return source.read(limit).decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def readiness_error(message: str, log_path: Path | None) -> RuntimeError:
+    tail = log_tail(log_path)
+    return RuntimeError(message + ("\nLast local fixture service log:\n" + tail if tail else "\nThe local fixture service log is empty or unavailable."))
+
+
+def wait_ready(process, url, surface, opener, *, log_path=None):
     deadline = time.monotonic() + 40
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"Frozen {surface} service stopped with code {process.returncode}.")
+            raise readiness_error(f"Frozen {surface} service stopped with code {process.returncode}.", log_path)
         try:
             result = request_json(opener, url + "/health")
             if result == {"status": "ok", "surface": surface}:
@@ -53,7 +71,7 @@ def wait_ready(process, url, surface, opener):
         except (OSError, ValueError, HTTPError, URLError):
             pass
         time.sleep(0.2)
-    raise RuntimeError(f"Frozen {surface} service did not become ready.")
+    raise readiness_error(f"Frozen {surface} service did not become ready.", log_path)
 
 
 def multipart_audio(path: Path):
@@ -109,16 +127,29 @@ def stop_process(process):
         process.wait(timeout=15)
 
 
-def smoke(executable: Path) -> dict:
+def initial_report() -> dict:
+    return {"status": "running", "checks": [], "external_audio_downloads": False, "supabase_mutations": False}
+
+
+def preserve_fixture_logs(home: Path, report: dict) -> None:
+    logs = {path.name: tail for path in home.glob("*.log") if (tail := log_tail(path))}
+    if logs:
+        report["local_fixture_logs"] = logs
+
+
+def smoke(executable: Path, *, report=None) -> dict:
     if os.name != "nt":
         raise RuntimeError("The frozen Windows smoke test must run on Windows.")
     executable = executable.resolve()
     if not executable.is_file():
         raise RuntimeError("The frozen executable is missing.")
     tools = executable.parent / "_internal" / "tools"
-    report = {"status": "running", "checks": [], "external_audio_downloads": False, "supabase_mutations": False}
+    report = initial_report() if report is None else report
     with tempfile.TemporaryDirectory(prefix="studio-fanny-smoke-") as temporary, ExitStack() as stack:
         home = Path(temporary)
+        # Runs after child processes/log handles close but before TempDir is
+        # deleted; diagnostics contain only this generated local test fixture.
+        stack.callback(preserve_fixture_logs, home, report)
         environment = os.environ.copy()
         for name in list(environment):
             if name.startswith("SUPABASE_"):
@@ -167,11 +198,12 @@ def smoke(executable: Path) -> dict:
         report["checks"].append("real frozen Tk GUI opened and closed")
         opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(http.cookiejar.CookieJar()))
         bases = {"guest": f"http://127.0.0.1:{guest_port}", "admin": f"http://127.0.0.1:{admin_port}"}
-        supervisor_log = stack.enter_context((home / "supervisor.log").open("wb"))
+        supervisor_log_path = home / "supervisor.log"
+        supervisor_log = stack.enter_context(supervisor_log_path.open("wb"))
         supervisor = subprocess.Popen([str(executable), "--service", "start"], env=environment, cwd=home, stdout=supervisor_log, stderr=subprocess.STDOUT)
         stack.callback(stop_process, supervisor)
         for surface in ("guest", "admin"):
-            wait_ready(supervisor, bases[surface], surface, opener)
+            wait_ready(supervisor, bases[surface], surface, opener, log_path=supervisor_log_path)
         records = json.loads((home / "data" / "processes.json").read_text(encoding="utf-8"))
         if {record["service"] for record in records} != {"serve guest", "serve admin", "worker"} or not all(psutil.pid_exists(record["pid"]) for record in records):
             raise RuntimeError("Frozen start did not supervise the guest, administrator and worker.")
@@ -183,10 +215,11 @@ def smoke(executable: Path) -> dict:
             raise RuntimeError("Frozen stop did not clear its process register while preserving the database.")
         report["checks"].append("frozen supervisor start/worker/readiness/stop with no orphan processes")
         for surface in ("guest", "admin"):
-            log = stack.enter_context((home / f"{surface}.log").open("wb"))
+            log_path = home / f"{surface}.log"
+            log = stack.enter_context(log_path.open("wb"))
             process = subprocess.Popen([str(executable), "--service", "serve", surface], env=environment, cwd=home, stdout=log, stderr=subprocess.STDOUT)
             stack.callback(stop_process, process)
-            wait_ready(process, bases[surface], surface, opener)
+            wait_ready(process, bases[surface], surface, opener, log_path=log_path)
         report["checks"].append("independent frozen guest/admin HTTP health")
         with opener.open(bases["guest"] + "/", timeout=20) as response:
             if b"styles.css" not in response.read():
@@ -241,11 +274,13 @@ def main():
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
+    report = initial_report()
     try:
-        report = smoke(args.executable)
+        report = smoke(args.executable, report=report)
     except Exception as error:
+        report.update(status="failed", error=str(error))
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps({"status": "failed", "error": str(error), "external_audio_downloads": False, "supabase_mutations": False}, indent=2), encoding="utf-8")
+        args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
         raise
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

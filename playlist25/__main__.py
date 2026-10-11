@@ -153,7 +153,11 @@ def start(cfg):
             environment=os.environ.copy()
             environment.update(PLAYLIST25_HOME=str(cfg.root),DATA_DIR=str(cfg.data_dir))
             options={"cwd":str(cfg.root if getattr(sys,"frozen",False) else SOURCE_ROOT),"env":environment}
-            if os.name=="nt": options["creationflags"]=subprocess.CREATE_NEW_PROCESS_GROUP
+            if os.name=="nt":
+                # Windowed bootloaders do not restore child standard handles
+                # automatically. The dispatch entry has reopened these streams.
+                options.update(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                               stdout=sys.stdout,stderr=sys.stderr,stdin=subprocess.DEVNULL)
             process=subprocess.Popen(service_command(*command),**options)
             children.append(process)
             records.append({"pid":process.pid,"started":psutil.Process(process.pid).create_time(),"service":" ".join(command),

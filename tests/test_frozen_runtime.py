@@ -89,9 +89,13 @@ def test_process_identity_rejects_recycled_pid_wrong_program_and_other_home(tmp_
     assert not runtime._matches_service(_snapshot(executable, arguments), {**record, "home": str(tmp_path / "elsewhere")}, cfg)
 
 
-def test_frozen_supervisor_uses_external_home_and_stop_conserves_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("windows", [False, True])
+def test_frozen_supervisor_uses_external_home_and_stop_conserves_state(tmp_path, monkeypatch, windows):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(tmp_path / "Studio-Fanny.exe"))
+    if windows:
+        monkeypatch.setattr(runtime, "os", SimpleNamespace(name="nt", environ=os.environ, path=os.path))
+        monkeypatch.setattr(runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
     cfg = Settings(root=tmp_path / "home", data_dir=tmp_path / "home" / "music", session_secret="runtime-state-test-secret")
     cfg.root.mkdir()
     db.init_db(cfg)
@@ -127,6 +131,10 @@ def test_frozen_supervisor_uses_external_home_and_stop_conserves_state(tmp_path,
     assert [command for command, _ in launches] == [runtime.service_command("serve", "guest"), runtime.service_command("serve", "admin"), runtime.service_command("worker")]
     assert all(options["cwd"] == str(cfg.root) and options["env"]["PLAYLIST25_HOME"] == str(cfg.root)
                and options["env"]["DATA_DIR"] == str(cfg.data_dir) for _, options in launches)
+    if windows:
+        assert all(options["stdout"] is sys.stdout and options["stderr"] is sys.stderr
+                   and options["stdin"] == subprocess.DEVNULL and options["creationflags"] == 512
+                   for _, options in launches)
     assert len(records) == 3 and all(record["executable"] == sys.executable for record in records)
     assert terminated == [process.pid for process in children]
     assert not (cfg.data_dir / "processes.json").exists()

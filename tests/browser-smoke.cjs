@@ -22,6 +22,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'playlist25-browser-data-'
 const password = randomBytes(24).toString('base64url');
 const simulatedLanHost = '192.168.50.10';
 const report = { youtubeMetadata: 'simulated', audioFixture: 'locally generated one-second silent WAV',
+  avatarFixture: 'locally generated colored PNG, saved and retrieved through real guest API and SQLite',
   youtubePlayer: 'minimal locally fulfilled iframe; no YouTube connection or music playback',
   transferNetwork: 'simulated private address routed to loopback with exact Host; real Wi-Fi/phone not tested',
   workerStarted: false, checks: [], pageErrors: [], consoleErrors: [], requestFailures: [], screenshots: [],
@@ -188,6 +189,30 @@ async function previewClosed(page) {
   await page.locator('#preview-dialog').waitFor({ state: 'hidden' });
   await page.waitForFunction(() => document.querySelectorAll('iframe').length === 0);
 }
+async function photoFixture(page) {
+  const uri = await page.evaluate(() => {
+    const canvas = document.createElement('canvas'); canvas.width = 400; canvas.height = 200;
+    const context = canvas.getContext('2d'); context.fillStyle = '#a4364d'; context.fillRect(0, 0, 400, 200);
+    context.fillStyle = '#00aa55'; context.fillRect(100, 0, 200, 200);
+    return canvas.toDataURL('image/png');
+  });
+  return { name: 'Photo synthétique.png', mimeType: 'image/png', buffer: Buffer.from(uri.split(',')[1], 'base64') };
+}
+async function guestSnapshot(context, guestUrl) {
+  const response = await context.request.get(`${guestUrl}/api/session`);
+  assert.equal(response.status(), 200);
+  return response.json();
+}
+async function addYoutubeLink(page, url, mode = null) {
+  await page.locator('#tab-link').click(); await page.locator('#link-input').fill(url);
+  const responsePromise = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/proposals');
+  await page.locator('#link-form button[type="submit"]').click();
+  if (mode) { await page.locator('#proposal-scope-dialog').waitFor({ state: 'visible' }); await page.locator(`#proposal-choice-${mode}`).click(); }
+  const response = await responsePromise; assert.equal(response.status(), 200);
+  const result = await response.json(); assert.ok(result.item);
+  await page.locator(`[data-withdraw-id="${result.item.id}"]`).waitFor();
+  return result.item;
+}
 
 async function main() {
   fs.mkdirSync(artifactDir, { recursive: true });
@@ -197,7 +222,8 @@ async function main() {
     EVENT_NAME: 'Les 25 ans de Fanny',
     SESSION_SECRET: randomBytes(48).toString('base64url'), GUEST_HOST: '127.0.0.1', ADMIN_HOST: '127.0.0.1',
     GUEST_PORT: String(guestPort), ADMIN_PORT: String(adminPort), COOKIE_SECURE: 'false', LOCAL_URL: guestUrl,
-    PUBLIC_URL: '', SUPABASE_URL: '', SUPABASE_SERVICE_ROLE_KEY: '', SUPABASE_ANON_KEY: '', MIN_FREE_MB: '0' };
+    PUBLIC_URL: '', SUPABASE_URL: '', SUPABASE_SERVICE_ROLE_KEY: '', SUPABASE_ANON_KEY: '', MIN_FREE_MB: '0',
+    MAX_PROPOSALS: '0', MAX_PLAYLIST_ITEMS: '0', MAX_QUEUE_SIZE: '0' };
   execFileSync(python, ['-c', `
 from playlist25.config import load_settings
 from playlist25 import db
@@ -242,6 +268,32 @@ with wave.open(str(Path(cfg.data_dir)/'Silence autorisé.wav'),'wb') as wav:
   await guest.locator('.track-title').filter({ hasText: 'abcdefghijk' }).waitFor();
   assert.equal(await guest.locator('[data-preview-id="abcdefghijk"]').isDisabled(), true);
   checked('Lien YouTube canonique enregistré hors ligne');
+  const profileBefore = await guestSnapshot(desktop, guestUrl), photo = await photoFixture(guest);
+  await guest.locator('#identity-button').click(); await guest.locator('#profile-dialog').waitFor({ state: 'visible' });
+  assert.equal(await guest.locator('#profile-nickname').innerText(), 'Camille');
+  await guest.locator('#profile-photo-input').setInputFiles(photo);
+  await guest.waitForFunction(() => !document.querySelector('#profile-save').disabled);
+  await guest.locator('#profile-preview img').evaluate(image => image.decode());
+  assert.deepEqual(await guest.locator('#profile-preview img').evaluate(image => ({ width: image.naturalWidth, height: image.naturalHeight })), { width: 128, height: 128 });
+  const profileSave = guest.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/profile'));
+  await guest.locator('#profile-save').click(); assert.equal((await profileSave).status(), 200);
+  await guest.locator('#profile-dialog').waitFor({ state: 'hidden' });
+  const profileSaved = await guestSnapshot(desktop, guestUrl);
+  assert.equal(profileSaved.guest.id, profileBefore.guest.id); assert.equal(profileSaved.guest.nickname, 'Camille');
+  assert.match(profileSaved.guest.avatar_version, /^[a-f0-9]{32}$/);
+  await guest.reload(); await guest.locator('#guest-avatar img').waitFor();
+  await guest.locator('#guest-avatar img').evaluate(image => image.decode());
+  assert.equal(await guest.locator('#guest-avatar img').evaluate(image => image.naturalWidth), 128);
+  const storedPhotos = await desktop.request.get(`${guestUrl}/api/avatars?ids=${encodeURIComponent(profileSaved.guest.avatar_id)}`);
+  assert.equal(storedPhotos.status(), 200); const storedPhoto = (await storedPhotos.json()).items[0];
+  assert.equal(storedPhoto.version, profileSaved.guest.avatar_version);
+  execFileSync(python, ['-c', `import sys,base64,io\nfrom PIL import Image\nimage=Image.open(io.BytesIO(base64.b64decode(sys.argv[1].split(',',1)[1])))\nassert image.size==(128,128) and image.format=='PNG'\nassert not image.info\nr,g,b=image.convert('RGB').getpixel((64,64));assert g>100 and r<40 and b<130`, storedPhoto.avatar_data], { cwd: root, env });
+  const publicPhotoProposals = (await (await desktop.request.get(`${guestUrl}/api/proposals`)).json()).items;
+  assert.ok(publicPhotoProposals.every(item => !Object.hasOwn(item, 'avatar_data')));
+  checked('Photo recadrée 128 PNG sans métadonnées, persistée en SQLite et affichée après rechargement sans changer d’identité');
+  await guest.locator('#identity-button').click(); await noOverflow(guest, 'Profil photo bureau'); await screenshot(guest, 'guest-desktop-profile');
+  await guest.setViewportSize({ width: 390, height: 844 }); await noOverflow(guest, 'Profil photo mobile 390 px'); await screenshot(guest, 'guest-mobile-profile');
+  await guest.locator('#profile-cancel').click(); await guest.setViewportSize({ width: 1440, height: 1000 });
   const ownTrack = guest.locator('.track-card').filter({ hasText: 'Une idée accentuée été' });
   await ownTrack.locator('.vote-button').click();
   await guest.waitForFunction(() => [...document.querySelectorAll('.track-card')].find(n => n.textContent.includes('Une idée accentuée été'))?.querySelector('.vote-button')?.getAttribute('aria-pressed') === 'true');
@@ -291,6 +343,23 @@ with wave.open(str(Path(cfg.data_dir)/'Silence autorisé.wav'),'wb') as wav:
   await chooseNickname(mobile, 'Camille');
   assert.equal(await mobile.locator('[data-withdraw-id]').count(), 0);
   checked('Deux invités avec le même pseudo ne reçoivent aucun bouton de retrait pour les morceaux de l’autre');
+  const peerPhoto = mobile.locator('.track-card').filter({ hasText: 'Une idée accentuée été' }).locator('.tiny-avatar img');
+  await peerPhoto.waitFor(); await peerPhoto.evaluate(image => image.decode());
+  assert.equal(await peerPhoto.evaluate(image => image.naturalWidth), 128); assert.equal(await mobile.locator('#guest-avatar img').count(), 0);
+  const peerIdentity = await guestSnapshot(mobileContext, guestUrl); assert.notEqual(peerIdentity.guest.id, profileSaved.guest.id);
+  checked('Photo publique visible pour un autre invité au même pseudo, sans partager son profil ni ses droits');
+  const proposalsBeforeClear = (await (await desktop.request.get(`${guestUrl}/api/proposals`)).json()).items;
+  await guest.locator('#identity-button').click(); await guest.locator('#profile-remove-photo').click();
+  const clearProfile = guest.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/profile'));
+  await guest.locator('#profile-save').click(); assert.equal((await clearProfile).status(), 200);
+  await guest.locator('#profile-dialog').waitFor({ state: 'hidden' });
+  const profileCleared = await guestSnapshot(desktop, guestUrl); assert.equal(profileCleared.guest.id, profileSaved.guest.id);
+  assert.equal(profileCleared.guest.nickname, 'Camille'); assert.equal(profileCleared.guest.avatar_version, '');
+  assert.equal(await guest.locator('#guest-avatar').innerText(), 'C'); assert.equal(await guest.locator('#guest-avatar img').count(), 0);
+  const proposalsAfterClear = (await (await desktop.request.get(`${guestUrl}/api/proposals`)).json()).items;
+  assert.deepEqual(proposalsAfterClear.map(item => [item.id, item.votes]), proposalsBeforeClear.map(item => [item.id, item.votes]));
+  await mobile.locator('#refresh-proposals').click(); await mobile.waitForFunction(() => [...document.querySelectorAll('.track-card')].find(node => node.textContent.includes('Une idée accentuée été'))?.querySelector('.tiny-avatar img') === null);
+  checked('Retirer la photo restaure les initiales chez les invités et conserve identité, propositions et votes');
   await manualProposal(mobile, 'Deuxième navigateur', 'Autre artiste');
   assert.equal(await mobile.locator('[data-withdraw-id]').count(), 1);
   assert.equal(await mobile.locator('.track-card').filter({ hasText: 'Une idée accentuée été' }).locator('[data-withdraw-id]').count(), 0);
@@ -501,6 +570,43 @@ with wave.open(str(Path(cfg.data_dir)/'Silence autorisé.wav'),'wb') as wav:
   assert.equal(revokedZip.status(), 404);
   checked('Fermer le partage révoque l’accès à la page et au ZIP et efface le QR et le lien');
   await lanContext.close();
+
+  await guest.locator('#filter-all').click();
+  const publicPlaylist = await addYoutubeLink(guest, 'https://www.youtube.com/playlist?list=PLbirthday000123');
+  assert.equal(publicPlaylist.source_kind, 'playlist'); assert.equal(publicPlaylist.video_id, null); assert.equal(publicPlaylist.duration, null);
+  const publicPlaylistCard = guest.locator('.track-card').filter({ has: guest.locator(`[data-withdraw-id="${publicPlaylist.id}"]`) });
+  assert.equal(await publicPlaylistCard.locator('.playlist-tag').count(), 1);
+  assert.equal(await publicPlaylistCard.locator('[data-preview-id]').count(), 0);
+  assert.equal(await publicPlaylistCard.locator('a.result-source').getAttribute('href'), publicPlaylist.url);
+  assert.equal(await guest.locator('iframe').count(), 0);
+  execFileSync(python, ['-c', `import sys\nfrom playlist25.config import load_settings\nfrom playlist25 import db\nwith db.connect(load_settings()) as conn:\n source=conn.execute('SELECT video_id,url,duration FROM sources WHERE id=?',(int(sys.argv[1]),)).fetchone()\n assert source['video_id'] is None and source['url']==sys.argv[2] and source['duration'] is None\n assert conn.execute('SELECT COUNT(*) FROM playlists WHERE source_url=?',(sys.argv[2],)).fetchone()[0]==0`, String(publicPlaylist.source_id), publicPlaylist.url], { cwd: root, env });
+  checked('Playlist publique enregistrée comme une seule proposition réelle, avec lien canonique et sans expansion ni lecteur vidéo');
+  const chosenVideo = await addYoutubeLink(guest, 'https://www.youtube.com/watch?v=bcdefghijkl&list=PLchoice000123', 'video');
+  assert.equal(chosenVideo.source_kind, 'video'); assert.equal(chosenVideo.video_id, 'bcdefghijkl');
+  assert.equal(chosenVideo.url, 'https://www.youtube.com/watch?v=bcdefghijkl'); assert.equal(chosenVideo.duration, 1);
+  const chosenPlaylist = await addYoutubeLink(guest, 'https://www.youtube.com/watch?v=bcdefghijkl&list=PLchoice000123', 'playlist');
+  assert.equal(chosenPlaylist.source_kind, 'playlist'); assert.equal(chosenPlaylist.video_id, null);
+  assert.equal(chosenPlaylist.url, 'https://www.youtube.com/playlist?list=PLchoice000123'); assert.equal(chosenPlaylist.duration, null);
+  assert.equal(await guest.locator('.track-card').filter({ has: guest.locator(`[data-withdraw-id="${chosenPlaylist.id}"]`) }).locator('[data-preview-id]').count(), 0);
+  checked('Lien vidéo + playlist : les deux choix explicites sont conservés par la vraie API sans choisir une vidéo à la place de la playlist');
+
+  // Simulate an older imported duplicate through the disposable SQLite fixture;
+  // no production database, music provider or worker is involved.
+  const mobileGuest = (await guestSnapshot(mobileContext, guestUrl)).guest;
+  execFileSync(python, ['-c', `import sys\nfrom playlist25.config import load_settings\nfrom playlist25 import db\nwith db.connect(load_settings()) as conn:\n source=conn.execute("SELECT id FROM sources WHERE video_id='abcdefghijk'").fetchone()[0]\n conn.execute('UPDATE sources SET duration=? WHERE id=?',(90061,source))\n conn.execute("UPDATE sources SET duration=59 WHERE video_id='bcdefghijkl'")\n conn.execute("INSERT INTO proposals(source_id,guest_id,state,created_at) VALUES(?,?,'approved',?)",(source,sys.argv[1],db.now()))\n conn.execute("UPDATE proposals SET state='approved' WHERE withdrawn_at IS NULL")\n conn.commit()`, mobileGuest.id], { cwd: root, env });
+  await guest.locator('#refresh-proposals').click(); await guest.locator('#stat-duration').filter({ hasText: '25 h 02 min' }).waitFor();
+  assert.equal(await guest.locator('#stat-duration-note').innerText(), '4 à compléter, dont 2 playlists à analyser');
+  assert.equal(await guest.locator('.track-details>span').filter({ hasText: '25:01:01' }).count(), 2);
+  await guest.locator('#filter-mine').click(); assert.equal(await guest.locator('#stat-duration').innerText(), '25 h 02 min');
+  await navigate(admin, 'dashboard'); await admin.locator('#dashboard-stats .stat-card').nth(3).locator('strong').filter({ hasText: '25 h 02' }).waitFor();
+  assert.match(await admin.locator('#dashboard-stats .stat-card').nth(3).innerText(), /durée connue/);
+  assert.match(await admin.locator('#dashboard-stats .stat-card').nth(3).innerText(), /4 durées à compléter/);
+  checked('Durée connue au-delà de 24 h, source dupliquée comptée une seule fois, inconnus signalés et total conservé lors du filtre invité');
+  execFileSync(python, ['-c', `from playlist25.config import load_settings\nfrom playlist25 import db\nwith db.connect(load_settings()) as conn:\n conn.execute("UPDATE sources SET duration=NULL WHERE video_id IN ('abcdefghijk','bcdefghijkl')")\n conn.commit()`], { cwd: root, env });
+  await guest.locator('#refresh-proposals').click(); await guest.locator('#stat-duration').filter({ hasText: 'À compléter' }).waitFor();
+  assert.equal(await guest.locator('#stat-duration-note').innerText(), '6 à compléter, dont 2 playlists à analyser');
+  await navigate(admin, 'dashboard'); await admin.locator('#dashboard-stats .stat-card').nth(3).locator('strong').filter({ hasText: 'À compléter' }).waitFor();
+  checked('Invités et studio affichent À compléter quand aucune durée n’est connue, sans présenter une playlist non analysée comme zéro minute');
 
   await navigate(admin, 'settings');
   await admin.locator('#diagnostics-list .diagnostic-row').first().waitFor();

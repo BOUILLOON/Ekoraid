@@ -43,7 +43,7 @@ jobs:
       - name: Vérifier les tests de distribution
         shell: pwsh
         run: |
-          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py -q --junitxml=build/windows/pytest.xml
+          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py tests/test_windows_smoke_diagnostics.py -q --junitxml=build/windows/pytest.xml
           $PlaylistTestExitCode = $LASTEXITCODE
           python scripts/packaging/annotate_pytest.py build/windows/pytest.xml
           exit $PlaylistTestExitCode

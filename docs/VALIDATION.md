@@ -1,60 +1,62 @@
 # Validation réalisée
 
-Résultats obtenus le **11 octobre 2026**, dans l’environnement Linux de développement. Les contrôles réseau réels sont indiqués séparément des tests utilisant des réponses simulées.
+Résultats obtenus le **11 octobre 2026**. Les tests de développement utilisent Linux ; les contrôles du navigateur, de Supabase et du paquet Windows sont distingués ci-dessous. Aucun test automatisé ne télécharge de musique YouTube commerciale.
 
-| Vérification | Résultat réellement obtenu |
+| Vérification | Résultat obtenu pour cette version |
 | --- | --- |
-| Suite Python du projet | **143 tests Pytest réussis** : API invités et administrateur, sessions, CSRF, retrait personnel, migration SQLite, transferts Wi-Fi, votes, sources, file, bibliothèque, exports et intégration cloud. Après l’ajustement du nom par défaut, les 28 tests de migration et des API invité/administrateur ont de nouveau réussi. |
-| Navigateur Chromium | **42 vérifications réussies**, sur écran de 1 440 px et écran mobile de 390 px : retrait personnel, aperçu sur demande, validation groupée, ZIP et partage. Treize captures, aucune erreur JavaScript, console ou réseau, aucune destination extérieure inattendue. |
-| Champ de recherche | Après ajustement CSS, vérification ciblée du site généré à 1 440 px et 390 px : texte séparé de l’icône, marge gauche 47 px et aucun débordement. Aucun appel cloud pour ce contrôle visuel. |
-| Audio local | Import d’un WAV silencieux généré pour le test, vérification par ffprobe, renommage avec accents, récupération du ZIP depuis le navigateur et contrôle des fichiers M3U8 UTF-8 utilisant des chemins relatifs. |
-| Installation et services Linux | Installation réutilisable, diagnostics et génération du site statique réussis. Démarrage, arrêt et redémarrage des services contrôlés ; commande d’arrêt et superviseur terminés avec le code **0**. |
-| Docker sous Linux | Image de la première version réellement construite, avec vérification TLS et sommes de contrôle conservées. Diagnostics et requêtes aux services invités/administrateur réussis dans un conteneur sans accès réseau extérieur, puis conteneur arrêté. L’image n’a pas été reconstruite pour les ajouts Fanny/retrait/transfert. |
-| Scripts Windows | Revue des scripts sans exécution PowerShell. L’installation et le lancement sur Windows 11 restent à essayer sur le PC de l’organisateur. |
-| GitHub Pages | **Construction et déploiement réussis** de cette mise à jour par le workflow [38160787000](https://github.com/BOUILLOON/Ekoraid/actions/runs/38160787000), commit `b4d967d`. L’API Pages confirme un site public, HTTPS obligatoire et source GitHub Actions à https://bouilloon.github.io/Ekoraid/. La lecture directe de cette URL depuis l’environnement Codex reste refusée par son proxy réseau (CONNECT 403 avant toute réponse du site) ; aucune vérification HTTP/navigateur à cette URL n’est revendiquée. |
+| Suite Python | **255 tests réussis, 1 ignoré et 7 sous-tests**, en **21,30 s**. Le test ignoré exige PowerShell, absent de cet environnement Linux. La suite couvre les API, les permissions, les photos, les durées, les playlists proposées, les migrations, la file, les fichiers, les exports, la synchronisation et le lancement autonome. |
+| Distribution Windows : tests locaux | **21 tests de packaging réussis** après la dernière correction de l’archive, avec un contrôle supplémentaire des chemins Windows. Ces tests Linux ne prouvent pas le fonctionnement de l’exécutable sous Windows. |
+| Navigateur avec le vrai backend local | **51 vérifications réussies et 15 captures**, à 1 440 px et 390 px. API, SQLite, profils, WAV généré et ZIP réellement utilisés ; métadonnées YouTube et lecteurs vidéo simulés. Aucune erreur JavaScript, console ou réseau, aucune requête extérieure inattendue. |
+| Catalogue de 20 001 éléments dans Chromium | **14 vérifications réussies**, avec données et réponses API simulées. Pagination, recherche complète, sélection groupée, file, bibliothèque et pack vérifiés sans afficher tout le catalogue à la fois. |
+| Photos et durées dans Chromium | **11 vérifications ciblées réussies**, avec images générées et API simulée : JPEG/WebP, recadrage, annulation, enregistrement, retrait, identité conservée, durées distinctes et inconnues. |
+| Synchronisation cloud | **16 tests réussis et 7 sous-tests**, avec snapshots simulés. Conservation des identifiants, corrections, votes, retraits et photos ; récupération de gros catalogues par lots. |
+| PostgreSQL 16 isolé | Migration appliquée **deux fois** avec succès ; permissions, profils, durées, identifiants, propriétaires, votes, propositions illimitées et catalogue de **20 001 propositions** contrôlés. |
+| Parseur et adaptateur cloud | Tests Node réussis, avec réponses réseau simulées. |
+| Fonction de recherche Edge | Vérification Deno réussie ; **1 test en 9 étapes** réussi, avec réponses réseau simulées. |
+| Supabase réel | Mise à jour SQL, huit RPC concernées et fonction Edge installées et contrôlées. La comparaison avec la sauvegarde confirme que les identifiants, propriétaires et votes existants sont conservés ; propositions illimitées avec `max_proposals=0`. |
+| Recherche YouTube réelle | HTTP **200** pour une recherche de morceaux et pour les métadonnées d’une vidéo précise ; cette dernière renvoie une durée de **143 s**, via `youtube-public-search-exact-video`. Aucun audio téléchargé. |
+| GitHub Pages | Déploiement [38165026450](https://github.com/BOUILLOON/Ekoraid/actions/runs/38165026450) réussi, commit `9d9d6b3`. Publication de la version `8188d45` en cours dans [38165261752](https://github.com/BOUILLOON/Ekoraid/actions/runs/38165261752). |
+| Exécutable Windows autonome | Construction et test réel en cours dans [38165260096](https://github.com/BOUILLOON/Ekoraid/actions/runs/38165260096). **L’exécutable et sa release ne sont pas encore déclarés validés ou disponibles dans ce rapport.** |
 
-## Parcours vérifiés dans le navigateur
+## Parcours vérifiés avec le vrai backend local
 
-Le test démarre deux serveurs sur des ports locaux libres, avec une base temporaire et des identifiants de test. Il arrête ses processus et supprime sa base à la fin ; il ne modifie pas `.env.local`.
+Le test navigateur démarre les services sur des ports locaux libres, avec une base et des identifiants temporaires. Il arrête ses processus et supprime sa base à la fin, sans modifier la configuration privée de l’installation.
 
-- Pseudo conservé après rechargement, proposition manuelle et lien YouTube enregistrés hors ligne.
-- Ajout et retrait d’un vote, filtre « Mes propositions », recherche dans le catalogue et identités distinctes pour deux navigateurs partageant la même IP.
-- Recherche pendant la saisie, sans soumettre le formulaire, puis choix d’un résultat ; deux variantes d’un même lien retrouvent la même source.
-- Connexion privée, tableau de bord, QR code local, validation d’une sélection et confirmation des autorisations avant mise en file.
-- Suspension après le morceau en cours et import d’une playlist contenant un doublon et un élément indisponible, dans l’ordre analysé.
-- Import audio, renommage, préparation et récupération du pack, réglages, diagnostics et création de codes d’invitation.
-- Administration et fichiers audio absents de la surface publique ; administration exigeant une session.
-- Nom, invitation et détails de la soirée de Fanny ; aucun débordement sur écran mobile.
-- Retrait personnel avec annulation puis confirmation, compteurs actualisés et isolation de deux personnes portant le même pseudo.
-- Aperçu vidéo dans les résultats et les propositions : aucune iframe avant le clic, aucun autoplay, lecteur supprimé à la fermeture, contrôles bureau et mobile. Trois lecteurs ont été remplacés par une page de test locale ; aucune vidéo YouTube distante n’a été lue.
-- Validation groupée en une seule requête, puis export limité aux fichiers prêts sélectionnés ; véritable archive ZIP récupérée et inspectée.
-- Création d’un QR code avec expiration de dix minutes, téléchargement du même ZIP dans un contexte mobile et révocation rendant le lien indisponible. L’adresse privée `192.168.50.10` et l’interface réseau sont simulées par un proxy de test sur loopback qui conserve l’en-tête Host. La création de l’autorisation et le téléchargement utilisent le vrai backend ; les octets et le nom du ZIP correspondent au téléchargement administrateur. Ce test ne constitue pas un transfert entre appareils physiques sur le Wi-Fi.
+- Pseudo persistant, proposition manuelle, lien canonique, votes, recherche, filtre « Mes propositions » et séparation de deux navigateurs portant le même pseudo ou partageant la même IP.
+- Photo recadrée au centre en PNG de **128 × 128 pixels**, enregistrée par l’API dans SQLite puis affichée après rechargement. Une autre identité voit la photo publique sans obtenir les droits du profil. Retirer la photo conserve l’identité, les propositions et les votes.
+- Retrait personnel annulé puis confirmé, listes et compteurs actualisés, impossibilité de retirer les propositions d’autrui ou de valider celles déjà retirées.
+- Proposition d’un lien de playlist enregistrée comme **une seule proposition**, sans développement automatique ni lecteur de vidéo isolée. Pour une URL vidéo et playlist, les deux choix explicites sont conservés par l’API.
+- Durées au-delà de 24 heures sans remise à zéro, source dupliquée comptée une seule fois, inconnus signalés et total indépendant du filtre. Si toutes les durées sont inconnues, le site et le studio affichent **À compléter**.
+- Recherche pendant la saisie puis choix d’une version, sans lecteur chargé avant un clic. Les trois lecteurs ouverts pendant le test sont des pages locales simulées, sans autoplay ni lecture YouTube distante ; fermer le dialogue les supprime.
+- Connexion privée, réglages, diagnostics, QR local et codes d’invitation. Validation groupée en une requête, confirmation des droits avant mise en file et suspension après le morceau en cours.
+- Import d’une playlist simulée contenant un doublon et un élément indisponible, avec ordre conservé. La file est persistante ; le worker de téléchargement YouTube n’est pas lancé par ce test.
+- Import d’un WAV silencieux généré, contrôle réel par ffprobe, renommage accentué et ZIP récupéré dans le navigateur. Le pack contient uniquement les fichiers prêts, avec M3U8 UTF-8 et chemins relatifs.
+- Création du partage ZIP, QR, expiration de dix minutes, téléchargement identique sur un second navigateur mobile et révocation immédiate. Le réseau privé est **simulé sur loopback**, avec conservation de l’en-tête Host ; l’autorisation et les octets du ZIP passent par le vrai backend. Ce contrôle ne constitue pas un transfert entre appareils physiques sur Wi-Fi.
+- Interface lisible à 1 440 px et 390 px, administration et audio absents de la surface publique, routes privées exigeant une session.
 
-Les métadonnées YouTube sont **simulées** dans ce test. Aucun processus de téléchargement audio YouTube n’est lancé. Le WAV et le ZIP sont réellement traités par les outils locaux. Le rapport et les captures sont écrits dans un dossier temporaire `playlist25-browser-*` ; `PLAYLIST_BROWSER_ARTIFACTS` permet de choisir leur destination.
+Rapport et 15 captures : `/tmp/playlist25-browser-z5iWqu`. Ces fichiers sont des artefacts de l’environnement de test, pas des données publiées sur le site.
 
-Commande, depuis la racine du projet, avec Playwright et Chromium installés :
+## Gros catalogues, photos et durées : essais ciblés
 
-```bash
-node tests/browser-smoke.cjs
-```
+Le test Python [test_large_collections.py](../tests/test_large_collections.py) enregistre réellement **20 001 sources** dans SQLite, réserve les tâches, conserve les positions de playlist et écrit sur disque un pack de **20 001 fichiers** avec archive compatible ZIP64. Les fichiers de ce test contiennent des octets de fixture ; **ffprobe est simulé pour ce gros lot**. Les tests audio séparés et le parcours navigateur contrôlent de vrais échantillons générés avec ffprobe. Ce résultat ne signifie pas que 20 001 musiques YouTube ont été téléchargées ou écoutées.
 
-`CHROMIUM_PATH` permet de désigner un navigateur installé ; `PLAYLIST_TEST_PYTHON` permet de désigner le Python de l’environnement virtuel. Sans ces options, le test utilise `.venv` et Chromium lorsqu’il est disponible à l’emplacement système prévu.
+La synchronisation d’un catalogue de cette taille est vérifiée en **21 lots**. Les essais Chromium de gros catalogue vérifient la navigation, la recherche jusqu’au dernier élément, la sélection sur toutes les pages, la validation et la préparation groupées, les playlists, la bibliothèque et la sélection du pack. Le navigateur limite les éléments visibles tout en conservant la sélection complète. Les mutations de ces essais sont interceptées par des fixtures locales ; aucune requête n’atteint la production. Rapport et captures : `/tmp/playlist25-large-ooOUL4`.
 
-## Base cloud et recherche : tests isolés
+Les essais ciblés de profil vérifient également l’annulation, le retrait confirmé par enregistrement, la conversion JPEG/WebP en PNG, les limites de **10 Mo et 20 millions de pixels**, le refus d’un SVG renommé, le cache des seules photos visibles et la lecture sur écran mobile. Ils confirment la durée des sources distinctes, indépendante du filtre, et les playlists explicitement signalées comme restant à analyser. Rapport et captures : `/tmp/playlist25-profile-86WzXd`.
 
-Les contrôles suivants ont réussi :
+## Base cloud et permissions
 
-- Tests Node du parseur de recherche et de l’adaptateur public, avec réponses HTTP simulées.
-- Six tests Python de synchronisation SQLite/Pages utilisant des données de test, dont la conservation d’un retrait face à une ancienne validation et une nouvelle proposition après retrait sans reprise des anciens votes.
-- Application de la migration SQL **deux fois** dans un PostgreSQL 16 jetable sous Docker, sans port publié et sans réseau extérieur. Les contrôles couvrent RLS et permissions de table, isolation des sessions, invitations, quotas, doublons, votes concurrents et retrait, fusion des votes et publication administrateur atomique. La mise à jour vérifie également le retrait par son propriétaire, deux personnes portant le même pseudo, une collecte fermée, le retrait répété, le nouvel ajout avec un identifiant distinct et les indicateurs `mine: false` d’un visiteur anonyme.
-- Trois tests de migration SQLite conservent les identifiants, votes, références cloud, tâches et fichiers audio d’une ancienne base. Une migration répétée reste stable ; les colonnes personnalisées inconnues ou les références incohérentes interrompent la migration avec retour arrière.
-- Trente-cinq tests de transfert couvrent la session et le CSRF administrateur, le lien aléatoire limité à un ZIP, son expiration et sa révocation, le client et l’adresse réseau privés, le refus des en-têtes de proxy, les chemins et liens symboliques interdits ainsi que les archives modifiées. Les réponses de transfert imposent `no-store` et `no-referrer`.
-- Vérification TypeScript avec Deno, puis un test du gestionnaire Edge en cinq étapes avec réponses réseau simulées. Les contrôles portent notamment sur les destinations fixes, le budget serveur, les résultats YouTube et la confidentialité de la clé API optionnelle.
+PostgreSQL 16, dans un conteneur jetable, vérifie la migration répétée, RLS, le refus de lecture directe des tables et des RPC privées avec le rôle public, l’isolation des sessions et des profils, les invitations, les budgets par minute, les doublons, votes concurrents et retraits, la fusion et la publication administrateur atomique.
 
-Commandes de reproduction :
+Les tests SQLite et de synchronisation vérifient la conservation des références cloud, des corrections locales, des tâches et fichiers, des retraits et des votes. Les tests de transfert vérifient la session et le CSRF, l’autorisation limitée à un ZIP, expiration et révocation, clients et adresses privés, refus des en-têtes de proxy, chemins confinés et archives modifiées.
+
+Les tests Edge contrôlent les réponses de recherche et les métadonnées de vidéo, les destinations réseau fixes, les budgets serveur et la confidentialité de la clé API optionnelle. Les photos utilisent l’identité enregistrée dans le navigateur ; un pseudo identique ne donne aucun droit sur un autre profil.
+
+Commandes de reproduction, depuis la racine du projet :
 
 ```bash
 .venv/bin/python -m pytest -q
+node tests/browser-smoke.cjs
 node cloud/test_search.mjs
 node cloud/test_adapter.mjs
 .venv/bin/python cloud/test_sync.py
@@ -64,38 +66,22 @@ deno check cloud/supabase/functions/music-search/index.ts
 deno test --allow-env cloud/supabase/functions/music-search/index_test.ts
 ```
 
-Le test SQL nécessite Docker. Les tests Edge ont été exécutés avec Deno dans un conteneur officiel. Sous Windows, remplacez `.venv/bin/python` par `.venv\Scripts\python.exe` pour les commandes Python.
+Le test navigateur nécessite Playwright et Chromium ; `CHROMIUM_PATH`, `PLAYLIST_TEST_PYTHON` et `PLAYLIST_BROWSER_ARTIFACTS` permettent de choisir le navigateur, Python et le dossier des rapports. Le test SQL nécessite Docker. Sous Windows, remplacez `.venv/bin/python` par `.venv\Scripts\python.exe` pour les commandes Python.
 
-## Contrôles réseau réels Supabase
+## Contrôles sur les services publics réels
 
-Sur le projet configuré, avec **uniquement la clé publique publishable** côté invité :
+Avant la mise à jour Supabase, une sauvegarde privée hors Git contenait **27 sources, 29 propositions, 8 invités et 14 votes**. La comparaison avant/après confirme la conservation de leurs identifiants, propriétaires et votes. La mise à jour ne réinitialise pas la collecte ; `max_proposals=0` laisse les propositions illimitées. Aucune identité, proposition ou vote de test n’a été créé sur ce projet réel.
 
-| Opération | Réponse observée |
-| --- | --- |
-| Session publique | HTTP **200**, invité absent, réglages publics reçus, événement « Les 25 ans de Fanny ». |
-| Liste des propositions | HTTP **200**, les deux propositions existantes conservées ; indicateurs `mine` strictement faux pour un visiteur anonyme. |
-| Lecture directe des tables invités et invitations | HTTP **401**, refus PostgreSQL `42501`. |
-| RPC de snapshot administrateur | HTTP **401**, refus PostgreSQL `42501`. |
-| RPC de publication administrateur | HTTP **401**, refus PostgreSQL `42501`. |
-| RPC de retrait avec un jeton au format valide mais sans identité | HTTP **200**, erreur applicative **401** ; aucune proposition modifiée. |
-| Fonction `music-search`, requête « Dalida » | HTTP **200**, fournisseur `youtube-public-search`, cinq vidéos réelles reçues sans clé YouTube optionnelle. |
+Les contrôles avec la clé publique obtiennent HTTP **200** pour les sessions et le catalogue. La lecture directe des tables privées, le snapshot et la publication administrateur sont refusés HTTP **401**. Une recherche réelle reçoit cinq résultats YouTube ; les métadonnées d’un lien vidéo sont aussi récupérées par recherche exacte de cette vidéo, avec durée. Ces requêtes consomment des budgets de lecture/recherche, sans téléchargement audio ni lecture distante dans le navigateur de test.
 
-La recherche réelle a notamment reçu « Dalida - Il venait d’avoir 18 ans » (**188 s**) et « Dalida - Le temps des fleurs » (**238 s**). D’autres résultats étaient une interview et une compilation : le choix de la bonne version reste à l’invité. Ce contrôle a utilisé les budgets de lecture/recherche anonymes et n’a créé aucune identité, proposition ou vote ; aucun audio n’a été téléchargé.
+Le site public est à <https://bouilloon.github.io/Ekoraid/>. Le succès d’un workflow Pages prouve le déploiement ; l’ouverture directe de ce domaine depuis l’environnement Codex reste bloquée par son proxy avant toute réponse du site. Les essais de l’interface construite et du backend Supabase réel sont distincts d’une visite directe de cette adresse. Les services gratuits restent à vérifier avant la soirée.
 
-Avant la mise à jour SQL, un snapshot privé de sauvegarde a été enregistré hors Git. Le schéma et les permissions Supabase ont été installés et vérifiés, puis le nom de l’événement a été publié sans modification de proposition. La comparaison avant/après confirme la conservation de l’invité, des deux sources et des deux propositions existantes. Aucun invité ni morceau de test n’a été ajouté sur le projet réel.
+## Vérifications restantes
 
-L’instance locale de préparation a aussi été réellement lancée avec sa configuration privée : connexion administrateur réussie, `POST /api/cloud/sync` HTTP **200** avec les deux propositions réelles, adresses de transfert privées reçues en HTTP **200**, puis arrêt propre. Cette synchronisation utilise la clé privilégiée **uniquement dans le backend local**. Les requêtes invité HTML/session/catalogue ont répondu HTTP **200** ; les routes privées d’administration, de cloud et `static/admin.js` ont répondu **404** sur le service invité. Un lien de transfert sans autorisation a renvoyé **404**, avec `no-store` et `no-referrer`.
+- Fin du workflow Windows, contrôle du vrai exécutable et publication de l’archive. Le parcours installé sur le PC Windows 11 de l’organisation reste ensuite à vérifier, même si le runner CI réussit.
+- Réception du ZIP sur un téléphone ou une tablette physique, sur votre Wi-Fi et celui de la salle.
+- Ouverture du pack dans Mixxx, déplacement du dossier complet et lecture avec le matériel audio de la soirée, Internet coupé.
+- Préparation d’un fichier externe autorisé et écoute d’un aperçu YouTube réel. Les essais rapportés n’ont téléchargé aucun audio YouTube réel ni lu de vidéo distante.
+- Ouverture du site Pages publié et collecte depuis un appareil indépendant, avec le PC de préparation éteint.
 
-Pour la première version, le dossier exact `_site` destiné à Pages a été servi localement et contrôlé dans Chromium à **1 440 px et 390 px**, avec sa politique CSP et ses ressources publiques. Le formulaire de pseudo s’affiche, sans débordement ni erreur JavaScript. L’adaptateur du navigateur a reçu de **vraies réponses Supabase** : session HTTP 200, catalogue HTTP 200 alors vide et recherche « Dalida » HTTP 200 avec cinq résultats. Comme Chromium ne possédait pas le certificat de confiance du proxy de cet environnement, les seules requêtes au projet Supabase ont été transmises, sans modification de leur URL ou de leur contenu, par un transport Python/httpx utilisant le proxy normal et la vérification TLS active. Ce contrôle vérifie l’intégration de l’interface construite avec le backend réel ; il ne constitue pas une ouverture directe du domaine Pages. Aucune identité, proposition ni vote n’a été créé. Rapport et captures : dossier temporaire `playlist25-live-transport-*`.
-
-Ces résultats établissent le fonctionnement du fournisseur et des permissions au moment du contrôle. La disponibilité future des services gratuits reste à vérifier avant la soirée.
-
-## Vérifications restantes sur votre matériel
-
-- Installation complète, lancement et arrêt sur Windows 11.
-- Utilisation sur un téléphone ou une tablette physique, réception du ZIP sur votre Wi-Fi et sur celui de la salle.
-- Ouverture du pack dans Mixxx, déplacement du dossier complet et lecture avec le matériel audio prévu.
-- Préparation d’un fichier externe dont vous avez les autorisations et lecture d’un aperçu YouTube réel : les essais réalisés n’ont téléchargé aucun audio YouTube réel ni lu de vidéo distante.
-- Ouverture de l’adresse GitHub Pages publiée et essai de collecte avec le PC de préparation éteint ; le déploiement a réussi, mais le proxy de l’environnement de préparation a empêché sa lecture directe.
-
-Aucune lecture dans Mixxx, aucun essai Android physique et aucune installation Windows réelle ne sont revendiqués dans ce rapport. Le fonctionnement hors ligne de la soirée doit être confirmé avec les fichiers et le matériel retenus.
+Aucune lecture réelle dans Mixxx ni aucun téléchargement réel de 10 000 ou 20 000 musiques n’est revendiqué. L’absence de plafond de nombre ne supprime pas le temps de préparation, l’espace disque nécessaire ou les limites des services gratuits.

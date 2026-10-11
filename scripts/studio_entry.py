@@ -86,3 +86,15 @@ if __name__ == "__main__":
                 pass
         print(f"Studio : {error}", file=sys.stderr)
         raise SystemExit(1)
+    except Exception:
+        # Windowed bootloaders can hide an uncaught service traceback in a
+        # dialog. Keep failures visible in the inherited private service log.
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        if len(sys.argv) == 1:
+            try:
+                from tkinter import messagebox
+                messagebox.showerror("Studio de Fanny", "Le studio a rencontré un problème au démarrage. Consultez son diagnostic avant de le relancer. Vos propositions et fichiers restent conservés.")
+            except Exception:
+                pass
+        raise SystemExit(1)
