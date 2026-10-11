@@ -40,6 +40,8 @@ npx --yes supabase@2.120.0 functions deploy music-search --project-ref dpcohlycz
 
 La configuration de la fonction se trouve dans [`supabase/config.toml`](supabase/config.toml). `verify_jwt=false` permet les clés publishable modernes. La fonction applique ses limites par RPC avec une clé publique ; elle n’utilise jamais `service_role`. Ses sorties et accès réseau sont limités à Supabase et aux destinations YouTube/Google fixes.
 
+La recherche renvoie cinq résultats par défaut, puis **Plus de résultats** demande le lot suivant. Le contrat `offset`/`limit` retourne `items`, `has_more` et `next_offset` ; les anciens clients continuent d’utiliser `items`. La version publique parcourt les résultats réellement présents dans la page fournie par YouTube, puis annonce leur fin. Elle n’invente aucune continuation. Une mise à jour de cette fonction seule se déploie avec `cloud/deploy_supabase.py --functions-only`, sans réappliquer le SQL ni réinitialiser la collecte.
+
 YouTube peut bloquer une recherche depuis l’hébergement ou changer son format. Dans ce cas, le site affiche une erreur et conserve **Coller un lien YouTube**, **Proposer un titre** et l’ouverture de YouTube pour choisir le lien. Aucune réponse n’est inventée. Un lien ajouté sans métadonnées est affiché comme « Vidéo YouTube … (titre à vérifier) » ; l’organisateur vérifiera les informations depuis son PC.
 
 Pour rendre la recherche plus stable, vous pouvez activer **YouTube Data API v3**, facultativement, avec son quota gratuit :
