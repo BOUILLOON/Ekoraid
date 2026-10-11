@@ -65,12 +65,21 @@ Deno.serve(async (request: Request) => {
     const budget = JSON.parse(await boundedText(budgetResponse, 8192));
     if (!budget.allowed) throw new SearchError(budget.error || "Recherche momentanément limitée.", budget.status || 429);
     if (action === "video") {
-      const endpoint = `https://www.youtube.com/watch?${new URLSearchParams({v: body.video_id, hl: "fr"})}`;
-      const response = await fetch(endpoint, {headers: {"Accept-Language": "fr-FR,fr;q=0.9", "User-Agent": "Playlist25/1.0"},
-        signal: AbortSignal.timeout(8000), redirect: "error"});
+      const headers = {"Accept-Language": "fr-FR,fr;q=0.9", "User-Agent": "Playlist25/1.0"};
+      try {
+        const endpoint = `https://www.youtube.com/watch?${new URLSearchParams({v: body.video_id, hl: "fr"})}`;
+        const response = await fetch(endpoint, {headers, signal: AbortSignal.timeout(8000), redirect: "error"});
+        if (!response.ok) throw new SearchError("Métadonnées watch indisponibles.");
+        return answer({item: parseYouTubeVideoHTML(await boundedText(response, 3 * 1024 * 1024), body.video_id),
+          provider: "youtube-public-video"});
+      } catch { /* Certains hébergements refusent watch mais autorisent la recherche publique. */ }
+      const endpoint = `https://www.youtube.com/results?${new URLSearchParams({search_query: body.video_id, hl: "fr"})}`;
+      const response = await fetch(endpoint, {headers, signal: AbortSignal.timeout(8000), redirect: "error"});
       if (!response.ok) throw new SearchError("YouTube n’a pas fourni les métadonnées de ce lien. La durée restera inconnue jusqu’à vérification.");
-      return answer({item: parseYouTubeVideoHTML(await boundedText(response, 3 * 1024 * 1024), body.video_id),
-        provider: "youtube-public-video"});
+      const item = parseYouTubeHTML(await boundedText(response, 3 * 1024 * 1024), 5)
+        .find((candidate: {video_id: string}) => candidate.video_id === body.video_id);
+      if (!item) throw new SearchError("YouTube n’a pas retourné ce morceau exact. La durée reste inconnue jusqu’à vérification.");
+      return answer({item, provider: "youtube-public-search-exact-video"});
     }
     let items;
     if (apiKey) {

@@ -109,7 +109,7 @@
     const headers = {"Content-Type": "application/json", apikey: cfg.key};
     if (cfg.legacy) headers.Authorization = `Bearer ${cfg.key}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), payload.action === "video" ? 25000 : 20000);
     let response, data;
     try {
       response = await fetch(`${cfg.url}/functions/v1/music-search`, {method: "POST", headers,
@@ -124,15 +124,31 @@
     return data;
   }
   const videoCache = new Map();
+  function rememberVideo(item) {
+    if (typeof item?.video_id !== "string" || !/^[A-Za-z0-9_-]{11}$/.test(item.video_id)
+        || typeof item.title !== "string" || !item.title.trim()) return null;
+    const duration = item.duration;
+    const metadata = {...item,
+      title: item.title.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 300),
+      channel: typeof item.channel === "string" ? item.channel.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 150) : "",
+      duration: typeof duration === "number" && Number.isFinite(duration) && duration > 0 && duration < 1e8 ? duration : null};
+    if (!metadata.title) return null;
+    const previous = videoCache.get(item.video_id);
+    if (metadata.duration === null && previous && Date.now() - previous.created < 300000)
+      metadata.duration = previous.item.duration;
+    if (!videoCache.has(item.video_id) && videoCache.size >= 200) videoCache.delete(videoCache.keys().next().value);
+    videoCache.set(item.video_id, {item: metadata, created: Date.now()});
+    return metadata;
+  }
   async function videoMetadata(id, token) {
     const cached = videoCache.get(id);
     if (cached && Date.now() - cached.created < 300000) return cached.item;
     const result = await edge({action: "video", video_id: id, guest_token: token});
-    if (result?.item?.video_id !== id || typeof result.item.title !== "string" || !result.item.title.trim())
+    if (result?.item?.video_id !== id)
       fail("YouTube n’a pas fourni de métadonnées valides pour ce morceau.", 503);
-    if (videoCache.size >= 200) videoCache.delete(videoCache.keys().next().value);
-    videoCache.set(id, {item: result.item, created: Date.now()});
-    return result.item;
+    const metadata = rememberVideo(result.item);
+    if (!metadata) fail("YouTube n’a pas fourni de métadonnées valides pour ce morceau.", 503);
+    return metadata;
   }
   async function request(path, options = {}) {
     const method = (options.method || "GET").toUpperCase();
@@ -144,7 +160,9 @@
     if (method === "GET" && route === "/api/search") {
       const query = (url.searchParams.get("q") || "").trim();
       if (query.length < 3 || query.length > 120) fail("Tapez entre 3 et 120 caractères pour chercher.", 422);
-      return edge({query, guest_token: token});
+      const result = await edge({query, guest_token: token});
+      if (Array.isArray(result?.items)) result.items.forEach(rememberVideo);
+      return result;
     }
     if (method === "GET" && route === "/api/metadata") {
       const source = youtubeSource(url.searchParams.get("url"), url.searchParams.get("mode"));

@@ -25,7 +25,7 @@ const context = {
       status = body.action === "video" ? videoStatus : searchStatus;
       data = status !== 200 ? {error: "YouTube refuse la recherche. Utilisez un lien."} : body.action === "video"
         ? {item: {video_id: body.video_id, title: "Fixture vidéo", duration: 222, channel: "Chaîne vidéo"}}
-        : {items: [{video_id: "abcDEF_1234", title: "Fixture"}]};
+        : {items: [{video_id: "search_1234", title: "Fixture recherche", duration: 188, channel: "Chaîne recherche"}]};
     }
     return {ok: status === 200, status, json: async () => data};
   },
@@ -101,6 +101,16 @@ const search = await provider.request("/api/search?q=Dalida");
 assert.equal(search.items.length, 1);
 assert.equal(calls.at(-1).body.guest_token, token);
 assert.equal(calls.at(-1).options.credentials, "omit");
+// Search is already real metadata. Adding its result must preserve duration
+// even when the watch endpoint is unavailable, without a redundant watch call.
+videoStatus = 503;
+const beforeSearchAdd = calls.length;
+await provider.request("/api/proposals", {method: "POST", body: {kind: "youtube", url: "https://youtu.be/search_1234", title: search.items[0].title}});
+assert.equal(calls.length, beforeSearchAdd + 1);
+assert.equal(calls.at(-1).url.endsWith("playlist25_propose"), true);
+assert.equal(calls.at(-1).body.p_duration, 188);
+assert.equal(calls.at(-1).body.p_channel, "Chaîne recherche");
+assert.equal(calls.at(-1).body.p_title, "Fixture recherche");
 searchStatus = 503;
 await assert.rejects(provider.request("/api/search?q=Dalida"), /Utilisez un lien/);
 context.window.PLAYLIST_CLOUD = {url: "https://testing-project.supabase.co", publicKey: "sb_secret_must_never_leave_the_PC"};

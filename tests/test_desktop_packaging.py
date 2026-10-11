@@ -20,7 +20,12 @@ def synthetic_archive(entries=None):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as output:
         for name, data in (entries or {"runtime/bin/ffmpeg.exe": b"synthetic test fixture, never executed", "runtime/LICENSE.txt": b"Test fixture license"}).items():
-            output.writestr(name, data)
+            # Windows ZipInfo converts backslashes during construction. Keep
+            # the malicious raw spelling in both ZIP headers for this fixture.
+            member = zipfile.ZipInfo(name)
+            member.filename = name
+            member.orig_filename = name
+            output.writestr(member, data)
     return stream.getvalue()
 
 
@@ -77,11 +82,18 @@ def test_vendor_only_selected_binaries_and_license(tmp_path):
 @pytest.mark.parametrize("name", ["../escaped.exe", "/escaped.exe", "C:/escaped.exe", "runtime\\escaped.exe"])
 def test_vendor_rejects_archive_traversal_before_writing_binaries(tmp_path, name):
     payload = synthetic_archive({"runtime/bin/ffmpeg.exe": b"fixture", "runtime/LICENSE.txt": b"license", name: b"unsafe"})
+    assert name.encode("utf-8") in payload
     archive = tmp_path / "fixture.zip"
     archive.write_bytes(payload)
     with pytest.raises(ValueError, match="unsafe path"):
         build.vendor_runtime(archive, runtime(payload), tmp_path / "tools", tmp_path / "licenses")
     assert not list((tmp_path / "tools").glob("*.exe"))
+
+
+def test_vendor_checks_original_name_before_windows_separator_normalization():
+    member = zipfile.ZipInfo("runtime/escaped.exe")
+    member.orig_filename = "runtime\\escaped.exe"
+    assert not build._safe_zip_member(member)
 
 
 def test_vendor_refuses_symlinks_and_unverified_archive(tmp_path):

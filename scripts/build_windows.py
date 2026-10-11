@@ -79,10 +79,12 @@ def download_verified(runtime: dict, cache: Path) -> Path:
 
 
 def _safe_zip_member(info: zipfile.ZipInfo) -> bool:
-    name = info.filename
+    # ZipInfo normalizes Windows backslashes in filename; orig_filename keeps
+    # the raw archive member name so malformed separators cannot be hidden.
+    name = info.orig_filename
     path = PurePosixPath(name)
     mode = info.external_attr >> 16
-    return bool(name and "\\" not in name and not path.is_absolute() and ":" not in name and ".." not in path.parts and not stat.S_ISLNK(mode))
+    return bool(name and "\x00" not in name and "\\" not in name and not path.is_absolute() and ":" not in name and ".." not in path.parts and not stat.S_ISLNK(mode))
 
 
 def vendor_runtime(archive: Path, runtime: dict, tools: Path, licenses: Path) -> None:

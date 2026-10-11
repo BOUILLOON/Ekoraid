@@ -63,6 +63,36 @@ Deno.test("Edge bounded routes, server budgets, actual metadata, optional free A
       check(response.status === 200 && result.item.duration === 321 && result.item.video_id === "abcDEF_1234", "Actual video metadata absent");
       check(destinations[1] === "https://www.youtube.com/watch?v=abcDEF_1234&hl=fr", "Noncanonical destination fetched");
     });
+    await test.step("blocked watch falls back to public search by exact requested video ID", async () => {
+      const destinations: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = String(input); destinations.push(url);
+        if (url.includes("playlist25_search_budget")) return new Response(JSON.stringify({allowed: true}));
+        if (url.startsWith("https://www.youtube.com/watch?")) return new Response("Blocked", {status: 403});
+        return new Response(fixtureHTML);
+      };
+      const response = await handler(videoRequest());
+      const result = await response.json();
+      check(response.status === 200 && result.item.video_id === "abcDEF_1234" && result.item.duration === 222, "Exact search metadata not retained");
+      check(result.provider === "youtube-public-search-exact-video", "Fallback provider missing");
+      check(destinations[2] === "https://www.youtube.com/results?search_query=abcDEF_1234&hl=fr", "Fallback searched an untrusted destination or query");
+      check(destinations.filter(url => url.includes("playlist25_search_budget")).length === 1, "Fallback consumed budget twice");
+    });
+    await test.step("malformed watch falls back but approximate search results never match", async () => {
+      let exact = true;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("playlist25_search_budget")) return new Response(JSON.stringify({allowed: true}));
+        if (url.startsWith("https://www.youtube.com/watch?")) return new Response("Consent required");
+        return new Response(exact ? fixtureHTML : fixtureHTML.replaceAll("abcDEF_1234", "other__1234"));
+      };
+      const found = await handler(videoRequest());
+      check(found.status === 200 && (await found.json()).item.duration === 222, "Malformed watch did not fall back to exact search");
+      exact = false;
+      const response = await handler(videoRequest());
+      const result = await response.json();
+      check(response.status === 503 && !result.item && typeof result.error === "string", "Approximate result invented metadata for another ID");
+    });
     await test.step("video metadata forbids URLs and quota failures before provider access", async () => {
       let requests = 0;
       globalThis.fetch = async () => { requests++; return new Response(JSON.stringify({allowed: false, error: "Budget", status: 429})); };

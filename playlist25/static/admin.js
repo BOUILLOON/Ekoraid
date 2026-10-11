@@ -9,7 +9,7 @@
   const button = (text, action, classes = "button subtle small") => { const node = el("button", classes, text); node.type = "button"; node.addEventListener("click", action); return node; };
   const feedback = (target, text, type = "info") => { target.replaceChildren(); if (text) target.append(el("p", `feedback ${type}`, text)); };
   const toast = (text) => { const node = el("div", "toast", text); $("#toasts").append(node); window.setTimeout(() => node.remove(), 5000); };
-  const duration = (seconds) => { if (seconds == null || !Number.isFinite(Number(seconds))) return "—"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; };
+  const duration = (seconds) => { if (seconds == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return "—"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; };
   const totalDuration = (seconds) => { const n = Math.floor(Number(seconds || 0) / 60); return n >= 60 ? `${Math.floor(n / 60)} h ${String(n % 60).padStart(2, "0")}` : `${n} min`; };
   const number = (value) => Number(value || 0).toLocaleString("fr");
   function pageItems(items, name, anchor, render) {
