@@ -4,7 +4,8 @@ Cette livraison ajoute la sauvegarde CSV/TXT du site public, les catégories gé
 
 | Vérification | Résultat |
 | --- | --- |
-| Suite Python Linux | **525 tests réussis, 1 ignoré, 7 sous-tests**, en **44,06 s** ; le test ignoré exige PowerShell. Le test de concurrence confirme qu’une recherche réseau de l’administration laisse un invité enregistrer sa demande pendant l’attente. |
+| Suite Python Linux | **532 tests réussis, 1 ignoré, 7 sous-tests**, en **43,82 s** ; le test ignoré exige PowerShell. Le test de concurrence confirme qu’une recherche réseau de l’administration laisse un invité enregistrer sa demande pendant l’attente. |
+| Suite Python Windows | **532 cas réussis, 1 ignoré**, en **413,12 s**, d’après le résumé JUnit joint à la release. Le cas ignoré exige deux fichiers dont seul la casse diffère, impossibles à créer sur ce Windows. Le parseur PowerShell et les vrais outils Node/FFmpeg/ffprobe sont utilisés. |
 | Chromium : compatibilité | **59 contrôles et 17 captures**, sans erreur JavaScript, console ou réseau. |
 | Chromium : sauvegarde publique | **7 groupes réussis** avec vraie API/SQLite et 67 propositions : export complet malgré filtres/pages, CSV UTF-8/formules/accents/catégories, TXT unique avec playlists, fraîcheur, copie hors ligne datée, annulation et refus propre sans cache. |
 | Chromium : catégories et Auth | **11 groupes réussis** : identité/propriétaire réel sur SQLite ; connexion/confirmation/rôles/renouvellement/déconnexion Supabase simulés. Une adresse ou un pseudo identique ne donne aucun droit. Suggestions privées, catégories initialement vides, création explicite, classement multiple, archive conservée et affichage mobile. |
@@ -33,7 +34,18 @@ node cloud/test_categories_adapter.mjs
 
 Les rapports privés de test sont dans `/tmp/playlist25-browser-Lzirac`, `/tmp/playlist25-public-export-browser-DP8UnF`, `/tmp/playlist25-category-browser-wdT2Ky`, `/tmp/playlist25-cloud-config-nAdPwW`, `/tmp/playlist25-history-browser-MOzdat` et `/tmp/playlist25-live-transport-fjH4Lk`. Les sauvegardes avant/après de production restent hors Git. Aucun audio externe ni proposition/vote/identité de test n’a été ajouté à la collecte réelle.
 
-La publication Windows de cette livraison reste à confirmer par son workflow natif avant de remplacer les preuves historiques ci-dessous. Les essais physiques sur le PC, téléphone/tablette, Wi-Fi et Mixxx restent distincts.
+## Application Windows du 14 octobre publiée
+
+La [release `studio-windows-v2026.10.14.1`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.14.1) fournit le [nouveau ZIP Windows](https://github.com/BOUILLOON/Ekoraid/releases/download/studio-windows-v2026.10.14.1/Studio-Fanny-Windows.zip), de **150 660 469 octets**. Le lien versionné et le raccourci `releases/latest/download/Studio-Fanny-Windows.zip` répondent HTTP **200** et désignent cette livraison. L’empreinte du fichier SHA-256 et le digest de l’asset GitHub concordent : `b369706a4e58938ed29e8d162611eb1cefc367517719bd7f6daf9bb55c5f4e73`.
+
+Le workflow [38636549598](https://github.com/BOUILLOON/Ekoraid/actions/runs/38636549598), commit `8ae0873a7b927bfdaea3870eca35d13a241e25bb`, a réussi sur **Windows-2025 / Python 3.12.10**. Il exécute la suite Python complète avant la compilation. Les rapports publics `pytest-summary.json`, `windows-smoke.json` et `build-info.json` sont joints à la release, avec le ZIP et son empreinte.
+
+Les **17 contrôles de l’exécutable compilé passent** : outils inclus, diagnostic indépendant, fenêtre Tk, deux lancements avec handles standard NULL, démarrage/arrêt sans processus restant, surfaces HTTP privées/invités, mot de passe et CSRF, WAV généré converti en MP3 réel, ZIP et M3U8, historique après reconnexion, HEAD et reprise par deux ranges, création de QR avec identifiants NTFS réels puis révocation, catégories initialement vides et classement réservé au propriétaire, sauvegarde/restauration conservant MP3, catégories archivées, classement et installation originale.
+
+Pour le contrôle QR, l’interface privée du runner est réellement énumérée ; la requête HTTP passe sur loopback avec son en-tête Host autorisé. Ce contrôle ne constitue pas un transfert sur un téléphone physique. Aucun audio extérieur ni aucune donnée Supabase ne sont modifiés par les tests Windows.
+
+Le workflow [Pages 38634548056](https://github.com/BOUILLOON/Ekoraid/actions/runs/38634548056) a publié le site public depuis `d7d0554` ; les quatre ressources publiques ont été comparées et sont identiques dans le commit Windows corrigé `8ae0873`. La lecture de contrôle après Pages retrouve toujours **17 invités, 111 sources, 114 propositions et 49 votes**, avec tous les anciens identifiants et propriétaires conservés. Le PC, téléphone/tablette, Wi-Fi de la salle et Mixxx restent à essayer physiquement ; l’application n’a pas de signature d’éditeur.
+
 
 # Validation historique du 11 octobre 2026
 
@@ -130,7 +142,7 @@ Le site public est à <https://bouilloon.github.io/Ekoraid/>. Le succès du work
 
 ## Application Windows autonome publiée
 
-La [release `studio-windows-v2026.10.11.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3) fournit [Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), de **150 606 046 octets** ; la vérification HEAD du lien public a répondu HTTP **200**. Le workflow [38171959994](https://github.com/BOUILLOON/Ekoraid/actions/runs/38171959994), commit `8648447b0c8d78f63bc9843baa6688d6452d7e59`, a construit et réellement exécuté l’application compilée sur **Windows-2025**, avec **Python 3.12.10**. Le rapport public `windows-smoke.json`, joint à la release, confirme ces résultats. L’empreinte calculée lors du build, le fichier SHA-256 et le digest de l’asset GitHub concordent : `52d5542ba7c0bb65f10a645405af33c411852744462326b8ce3fb6e7d610268f`.
+La [release `studio-windows-v2026.10.11.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3) fournit [Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/download/studio-windows-v2026.10.11.3/Studio-Fanny-Windows.zip), de **150 606 046 octets** ; la vérification HEAD du lien public a répondu HTTP **200**. Le workflow [38171959994](https://github.com/BOUILLOON/Ekoraid/actions/runs/38171959994), commit `8648447b0c8d78f63bc9843baa6688d6452d7e59`, a construit et réellement exécuté l’application compilée sur **Windows-2025**, avec **Python 3.12.10**. Le rapport public `windows-smoke.json`, joint à la release, confirme ces résultats. L’empreinte calculée lors du build, le fichier SHA-256 et le digest de l’asset GitHub concordent : `52d5542ba7c0bb65f10a645405af33c411852744462326b8ce3fb6e7d610268f`.
 
 Les **14 contrôles ont réussi** : outils et runtimes inclus, yt-dlp, exécutables, fenêtre Tk, démarrage puis arrêt des trois services sans processus restant, réponses HTTP, authentification et CSRF, conversion d’un WAV généré en MP3 avec les vrais FFmpeg/ffprobe, ZIP complet avec M3U8, séparation des ressources privées du service invités, diagnostic indépendant et sauvegarde/restauration complète vers un nouveau home. Ce dernier essai passe par les commandes de l’exécutable compilé, vérifie les octets du MP3 restauré et compare les données/configuration de l’installation originale. Les dialogues de sauvegarde/restauration eux-mêmes sont couverts par les tests de fenêtre avec dialogues simulés ; aucun clic manuel sur ces dialogues Windows n’est revendiqué.
 
