@@ -52,6 +52,30 @@ def share(cfg):
     return result, archive
 
 
+@pytest.mark.parametrize("large_id", [2 ** 63, 2 ** 64 - 1, 2 ** 96 + 37, 2 ** 128 - 1])
+def test_large_windows_file_ids_roundtrip_exactly_and_reject_replacement(cfg, monkeypatch, large_id):
+    original_signature = transfers._signature
+    file_identity = {"inode": large_id}
+    def windows_signature(metadata):
+        # All named/descriptor checks see the same synthetic NTFS identity;
+        # ZIP bytes, SQLite storage, authorization and HTTP streaming are real.
+        return original_signature(SimpleNamespace(st_size=metadata.st_size, st_mtime_ns=metadata.st_mtime_ns,
+                                                  st_dev=2 ** 64 + 3, st_ino=file_identity["inode"]))
+    monkeypatch.setattr(transfers, "_signature", windows_signature)
+    result, archive = share(cfg)
+    with connect(cfg) as conn:
+        row = conn.execute("SELECT device,inode,typeof(device),typeof(inode) FROM transfers WHERE id=?", (result["id"],)).fetchone()
+    assert tuple(row) == (f"file-id:{2 ** 64 + 3:x}", f"file-id:{large_id:x}", "text", "text")
+    client = guest_client(cfg)
+    url = urlsplit(result["url"]).path + "/download"
+    first = client.get(url, headers={"Range": "bytes=0-24"})
+    rest = client.get(url, headers={"Range": "bytes=25-", "If-Range": first.headers["etag"]})
+    assert first.status_code == rest.status_code == 206
+    assert first.content + rest.content == archive.read_bytes()
+    file_identity["inode"] += 1
+    assert client.get(url).status_code == 404
+
+
 def guest_client(cfg, *, client_ip="192.168.10.6", host=HOST):
     app = create_guest_app(cfg)
     transfers.attach_guest_routes(app, cfg)

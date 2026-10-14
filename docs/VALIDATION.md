@@ -4,16 +4,19 @@ Cette livraison ajoute la sauvegarde CSV/TXT du site public, les catégories gé
 
 | Vérification | Résultat |
 | --- | --- |
-| Suite Python Linux | **520 tests réussis, 1 ignoré, 7 sous-tests**, en **44,10 s** ; le test ignoré exige PowerShell. Un test de concurrence ajouté ensuite passe également : une recherche réseau de l’administration laisse un invité enregistrer sa demande pendant l’attente. |
+| Suite Python Linux | **525 tests réussis, 1 ignoré, 7 sous-tests**, en **44,06 s** ; le test ignoré exige PowerShell. Le test de concurrence confirme qu’une recherche réseau de l’administration laisse un invité enregistrer sa demande pendant l’attente. |
 | Chromium : compatibilité | **59 contrôles et 17 captures**, sans erreur JavaScript, console ou réseau. |
 | Chromium : sauvegarde publique | **7 groupes réussis** avec vraie API/SQLite et 67 propositions : export complet malgré filtres/pages, CSV UTF-8/formules/accents/catégories, TXT unique avec playlists, fraîcheur, copie hors ligne datée, annulation et refus propre sans cache. |
 | Chromium : catégories et Auth | **11 groupes réussis** : identité/propriétaire réel sur SQLite ; connexion/confirmation/rôles/renouvellement/déconnexion Supabase simulés. Une adresse ou un pseudo identique ne donne aucun droit. Suggestions privées, catégories initialement vides, création explicite, classement multiple, archive conservée et affichage mobile. |
 | Chromium : connexion privée du studio | **11 contrôles et 2 captures**, avec vraie API et fichier de configuration temporaire : session/CSRF, sauvegarde atomique, clé existante conservée, erreurs sans secret, rechargement et écran mobile. Validation distante simulée, sans écriture cloud. |
+| Chromium : historique des ZIP | **10 contrôles et 2 captures**, avec API/SQLite et 101 ZIP temporaires : pagination 100+1, sélection conservée, téléchargement identique, rechargement/reconnexion, QR associé au bon pack, révocation et omission des fichiers supprimés. Aucune création de nouveau pack par ces vérifications. |
 | Fichiers, gros lots et transfert | Copies/renommages/commits et erreurs injectées ; lot réel de **20 001 fichiers de test** et ZIP64. Téléchargements GET/HEAD/Range/If-Range, reconstruction exacte des octets, révocation/expiration et confinement du fichier contrôlés. Les gros lots ne sont pas des musiques téléchargées. |
 | PostgreSQL isolé | Schéma de base et extension catégories appliqués plusieurs fois ; **7 groupes** spécifiques aux catégories/Auth passent, y compris le redéploiement composé dans une transaction et la conservation des autorisations, votes et choix. Aucun test n’utilise de compte réel. |
 | Edge et adaptateurs | Tests Node des deux adaptateurs et du handler de production réussis. Deno **check réussi**, **1 test et 9 étapes réussis**, avec réseau simulé. |
 | Supabase réel | Migration additive catégories réussie. Comparaison privée avant/après : **17 invités, 111 sources, 114 propositions, 49 votes** et leurs identifiants/propriétaires conservés. **Aucune catégorie créée**. L’adresse organisation est autorisée ; aucun compte ni email n’a été créé/envoyé par ces vérifications. |
 | Interface construite + Supabase réel | Catalogue public de **108 propositions visibles**, recherche réelle HTTP 200 avec 5 résultats et durées, CSV réellement reçu de 21 539 octets, écran 1 440/390 px sans débordement ni erreur. Transport TLS vérifié par httpx ; ce contrôle local de `_site` ne constitue pas une visite directe du domaine Pages. |
+
+Le premier lancement de toute la suite sous Windows a révélé un défaut de transfert ZIP : un identifiant NTFS peut dépasser les 64 bits signés acceptés par SQLite. Le stockage garde désormais ces identifiants complets sous forme de texte hexadécimal préfixé, sans modification du schéma ni des lignes existantes. Les tests vérifient 63/64/96/128 bits, la reprise exacte du ZIP et le refus après changement d’identité ; aucun identifiant n’est tronqué. Cette version intermédiaire n’a pas été publiée comme application Windows.
 
 Le compte organisation doit être créé et confirmé par sa propriétaire avant la connexion réelle. Le callback Auth est configuré pour le site public et la confirmation globale reste activée. Le service email Supabase par défaut peut limiter les destinataires : le guide documente la création individuelle du compte dans Authentication → Users si nécessaire. Les essais de navigateur simulent GoTrue ; aucune connexion réelle de `info@bouillon.run` n’est revendiquée.
 
@@ -23,11 +26,12 @@ Nouveaux contrôles reproductibles :
 node tests/browser-public-export.cjs
 node tests/browser-categories.cjs
 node tests/browser-cloud-config.cjs
+node tests/browser-export-history.cjs
 node cloud/test_categories_adapter.mjs
 .venv/bin/python cloud/test_categories_sql.py
 ```
 
-Les rapports privés de test sont dans `/tmp/playlist25-browser-Lzirac`, `/tmp/playlist25-public-export-browser-Xlv7hN`, `/tmp/playlist25-category-browser-JWFo9r`, `/tmp/playlist25-cloud-config-nAdPwW` et `/tmp/playlist25-live-transport-fjH4Lk`. Les sauvegardes avant/après de production restent hors Git. Aucun audio externe ni proposition/vote/identité de test n’a été ajouté à la collecte réelle.
+Les rapports privés de test sont dans `/tmp/playlist25-browser-Lzirac`, `/tmp/playlist25-public-export-browser-DP8UnF`, `/tmp/playlist25-category-browser-wdT2Ky`, `/tmp/playlist25-cloud-config-nAdPwW`, `/tmp/playlist25-history-browser-MOzdat` et `/tmp/playlist25-live-transport-fjH4Lk`. Les sauvegardes avant/après de production restent hors Git. Aucun audio externe ni proposition/vote/identité de test n’a été ajouté à la collecte réelle.
 
 La publication Windows de cette livraison reste à confirmer par son workflow natif avant de remplacer les preuves historiques ci-dessous. Les essais physiques sur le PC, téléphone/tablette, Wi-Fi et Mixxx restent distincts.
 

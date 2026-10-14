@@ -52,7 +52,10 @@ jobs:
           python scripts/packaging/annotate_pytest.py build/windows/pytest.xml
           exit $PlaylistTestExitCode
       - name: Construire, ouvrir la fenêtre et tester le ZIP audio autorisé
-        run: python scripts/build_windows.py --work build/windows --destination dist/windows
+        run: |
+          python scripts/build_windows.py --work build/windows --destination dist/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item build/windows/pytest-summary.json dist/windows/pytest-summary.json
       - name: Conserver le ZIP et ses preuves de vérification
         id: artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -63,6 +66,7 @@ jobs:
             dist/windows/Studio-Fanny-Windows.zip.sha256
             dist/windows/build-info.json
             dist/windows/windows-smoke.json
+            dist/windows/pytest-summary.json
           if-no-files-found: error
           retention-days: 30
       - name: Conserver le rapport en cas d'échec du lancement Windows
@@ -73,6 +77,7 @@ jobs:
           path: |
             build/windows/windows-smoke.json
             build/windows/pytest.xml
+            build/windows/pytest-summary.json
           if-no-files-found: ignore
           retention-days: 7
       - name: Publier la release après le test Windows réel
@@ -106,6 +111,7 @@ jobs:
             dist/windows/Studio-Fanny-Windows.zip.sha256 `
             dist/windows/build-info.json `
             dist/windows/windows-smoke.json `
+            dist/windows/pytest-summary.json `
             --repo $env:RELEASE_REPOSITORY --target $env:RELEASE_COMMIT `
             --title "Studio Fanny pour Windows — $env:RELEASE_TAG" `
             --notes-file dist/windows/release-notes.txt --latest

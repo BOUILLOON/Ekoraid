@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPCookieProcessor, ProxyHandler
 import uuid
 import wave
@@ -334,10 +335,13 @@ def smoke(executable: Path, *, report=None) -> dict:
             raise RuntimeError("Frozen stop did not clear its process register while preserving the database.")
         report["checks"].append("frozen supervisor start/worker/readiness/stop with no orphan processes")
         independent_services = []
+        # Only the disposable guest fixture listens on the runner's private
+        # interface, so frozen QR creation uses real NTFS file identities.
+        independent_environment = {**environment, "GUEST_HOST": "0.0.0.0"}
         for surface in ("guest", "admin"):
             log_path = home / f"{surface}.log"
             log = stack.enter_context(log_path.open("wb"))
-            process = subprocess.Popen([str(executable), "--service", "serve", surface], env=environment, cwd=home, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(executable), "--service", "serve", surface], env=independent_environment, cwd=home, stdout=log, stderr=subprocess.STDOUT)
             independent_services.append(process)
             stack.callback(stop_process, process)
             wait_ready(process, bases[surface], surface, opener, log_path=log_path)
@@ -399,6 +403,28 @@ def smoke(executable: Path, *, report=None) -> dict:
         if b"".join(pieces) != downloaded:
             raise RuntimeError("Frozen partial ZIP transfer changed its bytes.")
         report["checks"].append("frozen ready ZIP history after reauthentication, HEAD and two resumed ranges")
+        addresses = request_json(opener, bases["admin"] + "/api/transfers/addresses")["addresses"]
+        if not addresses:
+            raise RuntimeError("The Windows CI runner needs a private IPv4 interface for the frozen transfer check.")
+        transfer = request_json(opener, bases["admin"] + "/api/transfers", data={"export_id": history[0]["id"], "host": addresses[0]["host"]}, csrf=csrf)
+        if not transfer["qr_data_url"].startswith("data:image/png;base64,"):
+            raise RuntimeError("Frozen transfer creation did not produce a QR code.")
+        shared = urlsplit(transfer["url"])
+        transfer_url = bases["guest"] + shared.path + "/download"
+        # HTTP stays on loopback, with the exact authorized LAN Host header.
+        # This proves compiled authorization and bytes, not a physical phone.
+        with opener.open(Request(transfer_url, headers={"Host": shared.netloc, "Range": "bytes=0-31"}), timeout=30) as response:
+            if response.status != 206 or response.read() != downloaded[:32]:
+                raise RuntimeError("Frozen temporary ZIP grant did not deliver the exact authorized range.")
+        request_json(opener, bases["admin"] + "/api/transfers/revoke", data={"id": transfer["id"]}, csrf=csrf)
+        try:
+            opener.open(Request(transfer_url, headers={"Host": shared.netloc}), timeout=30)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+        else:
+            raise RuntimeError("Frozen revoked temporary ZIP grant remained accessible.")
+        report["checks"].append("frozen QR transfer with real Windows file IDs, exact range and revocation on loopback")
         # Only synthetic local proposals are used. The catalog starts empty,
         # and identical nicknames never confer ownership of another request.
         if request_json(opener, bases["guest"] + "/api/proposals")["categories"]:

@@ -35,13 +35,13 @@ Le [guide d’administration](ADMINISTRATION.md) détaille leur utilisation. Les
 | --- | --- |
 | Retrouver son profil sur un autre appareil | Un code de récupération privé et facultatif permet de conserver ses propositions et droits de retrait sur son nouveau téléphone. Un pseudo seul ne doit pas donner accès au profil d’autrui. |
 | Corriger sa proposition | Modifier le titre ou la version avant validation, avec historique, sans retirer puis ajouter de nouveau. |
-| Plus de résultats à la demande | « Voir d’autres versions » après les premiers résultats, sans multiplier les requêtes tant que la personne n’en a pas besoin. |
-| Repères pour les versions | Indiquer live, reprise, remix ou instrumental lorsqu’on dispose de cette information, sans choisir automatiquement à la place de l’invité. |
+| Plus de résultats à la demande — livré | « Voir d’autres versions » après les premiers résultats, sans multiplier les requêtes tant que la personne n’en a pas besoin. |
+| Repères pour les versions — livrés | Indiquer live, reprise, remix ou instrumental lorsqu’on dispose de cette information, sans choisir automatiquement à la place de l’invité. |
 | État compréhensible | Afficher « idée reçue », « validée » ou « fichier prêt », après synchronisation de ces informations depuis le studio. Le site ne connaît actuellement pas toute la file du PC. |
-| Actualisation discrète | Conserver le défilement et le focus, avec « 3 nouveaux morceaux » au lieu de reconstruire immédiatement l’écran pendant la consultation. |
+| Actualisation discrète — livrée | Conserver le défilement et le focus, avec « 3 nouveaux morceaux » au lieu de reconstruire immédiatement l’écran pendant la consultation. |
 | Partage natif sur téléphone | Utiliser le menu de partage du téléphone pour envoyer le site directement vers l’application souhaitée. |
 | Affichage facile à lire | Option avec textes plus grands et boutons plus larges, navigation clavier et contrastes vérifiés. |
-| Brouillons en cas de coupure | Conserver localement le titre ou le lien en cours et proposer son envoi au retour de la connexion. |
+| Brouillons en cas de coupure — livrés | Conserver localement le titre ou le lien en cours et proposer son envoi au retour de la connexion. |
 | Message d’accueil personnalisable | Fanny choisit le message d’invitation et les indications utiles sans modifier le code du site. |
 
 ## Pour choisir la musique

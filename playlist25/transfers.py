@@ -172,8 +172,15 @@ def _open_archive(cfg, value: str):
     return path, file, metadata
 
 
-def _signature(metadata) -> tuple[int, int, int, int]:
-    return metadata.st_size, metadata.st_mtime_ns, metadata.st_dev, metadata.st_ino
+def _stored_file_id(value: int) -> int | str:
+    # NTFS can expose a 128-bit file identifier. SQLite INTEGER accepts signed
+    # 64-bit values only; a nonnumeric prefix keeps the complete identity as
+    # TEXT even in an INTEGER-affinity column. Existing small IDs stay intact.
+    return value if -(2 ** 63) <= value < 2 ** 63 else f"file-id:{value:x}"
+
+
+def _signature(metadata) -> tuple[int, int, int | str, int | str]:
+    return metadata.st_size, metadata.st_mtime_ns, _stored_file_id(metadata.st_dev), _stored_file_id(metadata.st_ino)
 
 
 def _download_range(header: str | None, size: int):
