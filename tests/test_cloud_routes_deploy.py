@@ -49,14 +49,18 @@ def test_migration_verifies_expected_functions(monkeypatch,capsys):
     module=deployment_module(); calls=[]
     def request(ref,method,suffix,body=None):
         calls.append((method,suffix,body))
-        return [{'functions':8}] if body.get('read_only') else []
+        return [{'functions':len(module.EXPECTED_FUNCTIONS),'distinct_functions':len(module.EXPECTED_FUNCTIONS)}] if body.get('read_only') else []
     monkeypatch.setattr(module,'management_request',request)
+    monkeypatch.setattr(module,'wait_for_schema_cache',lambda _ref:None)
     module.install_schema('test-ref')
     assert len(calls)==2 and calls[0][2]['read_only'] is False
     assert 'BEGIN' in calls[0][2]['query'].upper()
     assert 'playlist25_withdraw' in calls[1][2]['query']
     assert 'playlist25_profile' in calls[1][2]['query']
     assert 'playlist25_avatars' in calls[1][2]['query']
+    assert 'playlist25_organizer_session' in calls[1][2]['query']
+    assert 'playlist25_organizer_proposal_categories' in calls[1][2]['query']
+    assert 'playlist25_categories' in calls[0][2]['query']
     assert "n.nspname='public'" in calls[1][2]['query']
     assert 'vérifiés' in capsys.readouterr().out
 

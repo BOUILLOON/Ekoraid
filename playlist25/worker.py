@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import AbstractContextManager
+import hashlib
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import tempfile
 import time
 import uuid
 
@@ -66,14 +68,58 @@ class WorkerLock(AbstractContextManager):
         return False
 
 
-def _stop_process(process) -> None:
-    if process.poll() is not None:
-        return
+class _WindowsProcessJob:
+    """Keep ownership of this download's descendants after its parent exits."""
+    def __init__(self, process):
+        import ctypes
+        from ctypes import wintypes
+        class Limits(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                        ("flags", wintypes.DWORD), ("minimum_working_set", ctypes.c_size_t),
+                        ("maximum_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
+        class IO(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in ("reads", "writes", "other", "read_bytes", "write_bytes", "other_bytes")]
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("basic", Limits), ("io", IO), ("process_memory", ctypes.c_size_t),
+                        ("job_memory", ctypes.c_size_t), ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel.SetInformationJobObject.restype = wintypes.BOOL
+        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.TerminateJobObject.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        self.kernel, self.handle = kernel, kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError(ctypes.get_last_error(), "Impossible de créer l'isolation du téléchargement.")
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)) or not kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
+            code = ctypes.get_last_error()
+            self.close()
+            raise OSError(code, "Impossible d'isoler les sous-processus du téléchargement.")
+
+    def close(self):
+        if self.handle:
+            # Closing the owned job kills descendants even when yt-dlp has
+            # exited, unlike taskkill /PID on an already terminated parent.
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+
+
+def _stop_process(process, process_job=None) -> None:
+    if process_job is not None:
+        process_job.close()
     try:
-        if os.name == "nt":
+        if os.name == "nt" and process.poll() is None:
             # Terminate the FFmpeg child too, using only the OS-created numeric PID.
             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-        else:
+        elif os.name != "nt":
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired):
@@ -85,6 +131,44 @@ def _stop_process(process) -> None:
             process.wait(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
+    finally:
+        if os.name != "nt":
+            # A parent can exit before its FFmpeg child, which may also ignore
+            # SIGTERM. The complete owned session must release the output pipe.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+_OUTPUT_LINE_LIMIT = 16000
+
+
+def _read_output(stream, lines, cancelled, finished):
+    """Bound each read and allow cancellation while the output queue is full."""
+    discarding = False
+    try:
+        while not cancelled.is_set():
+            line = stream.readline(_OUTPUT_LINE_LIMIT + 1)
+            if not line:
+                break
+            if discarding:
+                discarding = not line.endswith("\n")
+                continue
+            oversized = len(line) > _OUTPUT_LINE_LIMIT
+            discarding = oversized and not line.endswith("\n")
+            line = line[:_OUTPUT_LINE_LIMIT]
+            while not cancelled.is_set():
+                try:
+                    lines.put(line, timeout=0.1)
+                    break
+                except thread_queue.Full:
+                    continue
+    except (OSError, ValueError):
+        # The owner can terminate a process and close its pipe during shutdown.
+        pass
+    finally:
+        finished.set()
 
 
 def _classify_error(message: str) -> TaskFailure:
@@ -139,17 +223,20 @@ def _download(job: dict, cfg, conn, stop: threading.Event) -> tuple[Path, dict]:
         process = subprocess.Popen(command, **kwargs)
     except OSError as exc:
         raise TaskFailure("yt-dlp ne démarre pas. Vérifiez les diagnostics et relancez l'installation.") from exc
+    process_job = None
+    if os.name == "nt":
+        try:
+            process_job = _WindowsProcessJob(process)
+        except OSError as exc:
+            _stop_process(process)
+            if process.stdout is not None:
+                process.stdout.close()
+            raise TaskFailure("Impossible d'isoler le téléchargement sous Windows. Relancez le studio et vérifiez les diagnostics.") from exc
     lines = thread_queue.Queue(maxsize=256)
     reader_finished = threading.Event()
-
-    def read_output():
-        try:
-            for line in process.stdout:
-                lines.put(line[:16000])
-        finally:
-            reader_finished.set()
-
-    reader = threading.Thread(target=read_output, daemon=True)
+    reader_cancelled = threading.Event()
+    reader = threading.Thread(target=_read_output, args=(process.stdout, lines, reader_cancelled, reader_finished),
+                              name=f"playlist25-reader-{job['id']}", daemon=True)
     reader.start()
     deadline = time.monotonic() + int(cfg.task_timeout)
     logs, file_path, measured_duration = deque(maxlen=12), None, None
@@ -173,23 +260,29 @@ def _download(job: dict, cfg, conn, stop: threading.Event) -> tuple[Path, dict]:
             if line.startswith("__PLAYLIST25_PROGRESS__"):
                 try:
                     data = json.loads(line.removeprefix("__PLAYLIST25_PROGRESS__"))
+                    if not isinstance(data, dict):
+                        continue
                     total, downloaded = float(data.get("total") or 0), float(data.get("downloaded") or 0)
+                    if not math.isfinite(total) or not math.isfinite(downloaded):
+                        continue
                     progress = min(90.0, max(0.0, downloaded / total * 90.0)) if total > 0 else 0.0
                     if abs(progress - last_progress) >= 0.5:
                         set_job_state(conn, job["id"], "downloading", progress=progress)
                         conn.commit()
                         last_progress = progress
-                except (ValueError, TypeError, KeyError):
+                except (ValueError, TypeError, KeyError, OverflowError):
                     pass
             elif line.startswith("__PLAYLIST25_INFO__"):
                 try:
                     data = json.loads(line.removeprefix("__PLAYLIST25_INFO__"))
+                    if not isinstance(data, dict):
+                        raise ValueError("invalid metadata")
                     if data.get("id") != parsed["video_id"]:
                         raise TaskFailure("YouTube a renvoyé un autre identifiant de vidéo.")
                     measured_duration = float(data.get("duration"))
                     if not math.isfinite(measured_duration) or measured_duration <= 0 or measured_duration > cfg.max_duration:
                         raise TaskFailure("Durée absente ou supérieure à la limite autorisée.", unavailable=True)
-                except (ValueError, TypeError) as exc:
+                except (ValueError, TypeError, OverflowError) as exc:
                     if isinstance(exc, TaskFailure):
                         raise
                     raise TaskFailure("Impossible de contrôler la durée du morceau avant téléchargement.", unavailable=True) from exc
@@ -218,10 +311,11 @@ def _download(job: dict, cfg, conn, stop: threading.Event) -> tuple[Path, dict]:
         metadata = verify_audio(file_path, cfg, job.get("duration") or measured_duration)
         return file_path, metadata
     finally:
-        _stop_process(process)
-        if process.stdout is not None:
+        reader_cancelled.set()
+        _stop_process(process, process_job)
+        reader.join(timeout=2)
+        if process.stdout is not None and not reader.is_alive():
             process.stdout.close()
-        reader.join(timeout=1)
 
 
 def _perform_job(conn, cfg, job: dict, stop: threading.Event) -> None:
@@ -231,23 +325,51 @@ def _perform_job(conn, cfg, job: dict, stop: threading.Event) -> None:
         staged, metadata = _download(job, cfg, conn, stop)
         # Moderation can correct a title/artist while a download is running.
         # Use the current source metadata when publishing its final file.
-        current = conn.execute("SELECT title,artist FROM sources WHERE id=?", (job["source_id"],)).fetchone()
+        current = conn.execute("SELECT title,artist,file_path,duration FROM sources WHERE id=?", (job["source_id"],)).fetchone()
         if current is None:
             raise TaskFailure("La source à publier n'existe plus.")
         title, artist = current["title"], current["artist"] or ""
         _write_tags(staged, title, artist)
         metadata = verify_audio(staged, cfg, metadata["duration"])
-        filename = safe_filename(job["source_id"], title, staged.suffix)
-        destination = resolve_audio_path(cfg, filename)
-        if destination.exists():
-            # Preserve existing user data, even when a previous file is invalid.
-            filename = safe_filename(job["source_id"], f"{title} - reprise {uuid.uuid4().hex[:8]}", staged.suffix)
+        if staged.stat().st_size > int(cfg.max_upload_mb) * 1024 * 1024:
+            raise TaskFailure("Le fichier audio final dépasse la limite de taille configurée.")
+        digest = hashlib.sha256()
+        with staged.open("rb") as audio:
+            for block in iter(lambda: audio.read(1024 * 1024), b""):
+                digest.update(block)
+        for attempt in range(5):
+            suffix = "" if attempt == 0 else f" - reprise {uuid.uuid4().hex[:8]}"
+            filename = safe_filename(job["source_id"], title + suffix, staged.suffix)
             destination = resolve_audio_path(cfg, filename)
-        # Persist the intended destination while still "verifying". A crash after
-        # the atomic move can then recover the file instead of orphaning it.
-        conn.execute("UPDATE sources SET file_path=?,duration=? WHERE id=?", (filename, metadata["duration"], job["source_id"]))
-        conn.commit()
-        _install_file(staged, destination)
+            if destination.exists():
+                continue
+            # The hash checkpoint proves file identity across a crash between
+            # path persistence and publication, including a late name collision.
+            checkpoint = {"job_id": job["id"], "source_id": job["source_id"], "filename": filename,
+                          "size": staged.stat().st_size, "sha256": digest.hexdigest()}
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=".publication-", dir=staging, delete=False) as marker:
+                marker_path = Path(marker.name)
+                json.dump(checkpoint, marker)
+                marker.flush()
+                os.fsync(marker.fileno())
+            try:
+                os.replace(marker_path, staging / "publication.json")
+            finally:
+                marker_path.unlink(missing_ok=True)
+            conn.execute("UPDATE sources SET file_path=?,duration=? WHERE id=?", (filename, metadata["duration"], job["source_id"]))
+            conn.commit()
+            try:
+                _install_file(staged, destination)
+                break
+            except BaseException as error:
+                conn.execute("UPDATE sources SET file_path=?,duration=? WHERE id=? AND file_path=?",
+                             (current["file_path"], current["duration"], job["source_id"], filename))
+                conn.commit()
+                if isinstance(error, FileExistsError):
+                    continue
+                raise
+        else:
+            raise TaskFailure("Impossible de réserver un nom de fichier libre. Réessayez ce morceau.")
         # Publish only after an actual check of the installed file.
         verify_audio(destination, cfg, metadata["duration"])
         set_job_state(conn, job["id"], "available", progress=100, message="Fichier audio disponible et vérifié.")

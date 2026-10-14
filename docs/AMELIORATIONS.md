@@ -2,7 +2,7 @@
 
 Ces idées complètent les fonctions déjà présentes : recherche, propositions de playlists, photos, aperçu vidéo, votes, retrait personnel, durées, préparation groupée, ZIP et partage sur le Wi-Fi. Elles ne sont pas toutes implémentées.
 
-Les corrections livrées portent sur le démarrage Windows sans console et l’indication des morceaux déjà proposés avant l’ajout sur le site public. Les propositions et votes doivent rester conservés pendant toutes les évolutions ; aucune idée ci-dessous ne nécessite de limiter le nombre total de morceaux des invités.
+Les corrections livrées portent sur le démarrage Windows sans console, les doublons, les erreurs de fichier pendant les téléchargements et la récupération des packs après rechargement. Les propositions et votes doivent rester conservés pendant toutes les évolutions ; aucune idée ci-dessous ne nécessite de limiter le nombre total de morceaux des invités.
 
 ## Évolutions retenues pour cette livraison
 
@@ -12,15 +12,22 @@ Les corrections livrées portent sur le démarrage Windows sans console et l’i
 - **Repères de versions** : live, reprise, remix et instrumental sont signalés d’après le titre. Ces indications restent à vérifier à l’écoute.
 - **Recherche dans le studio** : l’éditeur d’une demande permet de chercher et de choisir sa vidéo, puis de sauvegarder explicitement ce choix.
 - **Sauvegarde et restauration** : les boutons de la fenêtre Windows enregistrent une archive privée et la restaurent dans une nouvelle installation. L’ancienne reste intacte et la collecte publique n’est jamais remplacée par une sauvegarde locale.
+- **Sauvegarde publique CSV/TXT** : enregistrer toute la collecte et ses liens depuis le site, même quand le PC est éteint.
+- **Catégories sur le site public** : l’organisation crée les moments ; les invités classent leurs propres demandes, avec plusieurs moments possibles. Les suggestions restent privées jusqu’à leur création.
+- **Connexion du studio à chaud** : vérifier et enregistrer Supabase dans les réglages privés sans arrêter l’application ni la collecte.
+- **Historique des packs et transfert partiel** : retrouver les ZIP prêts après rechargement et reprendre leur transfert lorsque le navigateur le permet.
 - **Diagnostic sans fenêtre** : `Diagnostic-Studio.cmd`, près de l’exécutable, ouvre un rapport sans mot de passe ni clé privée.
 
 Le [guide d’administration](ADMINISTRATION.md) détaille leur utilisation. Les idées restantes ci-dessous restent des propositions.
 
-## Les trois prochaines priorités proposées
+## Les prochaines priorités proposées
 
-1. **Un parcours d’organisation guidé** : récupérer les idées → retrouver les versions → choisir → préparer → récupérer le ZIP, avec une progression et un bouton pour l’étape suivante.
-2. **Recherche intégrée pour les demandes manuelles — retenue** : dans « Modifier », chercher le morceau et choisir la vidéo sans devoir copier un lien depuis un autre site.
-3. **Sauvegarde et restauration simples — retenues** : archive privée de la configuration, de la base et des fichiers audio, avec aperçu avant restauration vers une nouvelle installation.
+1. **Objectifs par moment** : afficher la durée de chaque catégorie et viser, par exemple, une heure pour le repas et deux heures pour danser.
+2. **Classement groupé** : sélectionner plusieurs morceaux et leur affecter les mêmes moments en une fois, avec confirmation.
+3. **Packs par catégorie** : créer automatiquement des M3U8 accueil, repas, danse ou gâteau dans le ZIP, en conservant la liste complète.
+4. **Demandes à compléter** : une vue dédiée aux propositions sans lien, durées inconnues et erreurs, pour préparer la soirée plus vite.
+5. **Préparation de très gros lots** : estimation d’espace et progression persistante ; ZIP fractionnés pour faciliter leur récupération sur téléphone.
+6. **Récupération d’un profil invité** : un code privé facultatif pour retrouver ses droits sur un nouvel appareil, sans donner accès au profil d’autrui par son pseudo.
 
 ## Pour les invités
 
@@ -42,7 +49,7 @@ Le [guide d’administration](ADMINISTRATION.md) détaille leur utilisation. Les
 | Idée | Utilité |
 | --- | --- |
 | Objectif de durée | Composer une sélection pour une durée cible et voir ce qu’il manque, en signalant les durées encore inconnues. |
-| Moments de la soirée | Créer des listes accueil, repas, danse et fin de soirée ; un morceau peut appartenir à plusieurs listes. |
+| Moments de la soirée — livrés | Création et gestion sur le site public ; les invités classent leurs propres propositions parmi les catégories choisies par l’organisation. |
 | Sélection par critères | Choisir rapidement les titres validés selon leurs votes, leur durée ou un moment de la soirée, avec aperçu avant action. |
 | Versions proches à vérifier | Signaler les titres potentiellement équivalents sans fusionner automatiquement un original, une reprise et un remix. |
 | Plusieurs personnes à l’organisation | Prévoir des rôles distincts pour aider à retrouver les liens et organiser la sélection, avec historique des décisions. |

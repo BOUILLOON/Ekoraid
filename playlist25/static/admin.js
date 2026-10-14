@@ -4,6 +4,7 @@
   const $ = (selector) => document.querySelector(selector);
   const state = { session: null, settings: {}, view: "dashboard", proposals: [], selected: new Set(), library: [], exports: new Set(), analysis: null, positions: new Set(), jobs: [], paused: false, editing: null, rightsResolve: null, choiceResolve: null, pages: {}, pagination: {}, playlists: [], queueResult: null };
   let editSearchSerial = 0, editSearchAbort = null;
+  let cloudConfigDirty = false, cloudConfigPending = false;
   const PAGE_SIZE = 100;
   const labels = { pending: "À vérifier", approved: "Validé", rejected: "Refusé", archived: "Archivé", queued: "En attente", downloading: "Téléchargement", converting: "Conversion", verifying: "Vérification", available: "Disponible", interrupted: "Interrompu", unavailable: "Indisponible", failed: "Erreur", error: "Erreur", stopped: "Arrêté" };
   const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
@@ -51,7 +52,7 @@
     catch (error) { feedback(target, error.message, "error"); return null; }
     finally { if (trigger) trigger.disabled = false; }
   }
-  function showLogin() { $("#login-screen").classList.remove("hidden"); $("#admin-layout").classList.add("hidden"); state.session = null; }
+  function showLogin() { $("#login-screen").classList.remove("hidden"); $("#admin-layout").classList.add("hidden"); $("#cloud-private-key").value = ""; cloudConfigDirty = false; state.session = null; }
   async function showStudio() {
     state.session = await api("/api/session"); state.settings = state.session.settings || {};
     $("#login-screen").classList.add("hidden"); $("#admin-layout").classList.remove("hidden"); syncSettings();
@@ -82,6 +83,7 @@
       if (view === "imports") await loadPlaylists();
       if (view === "downloads") await loadJobs();
       if (view === "library" || view === "exports") await loadLibrary();
+      if (view === "exports") await loadExportHistory();
       if (view === "settings") { state.settings = await api("/api/settings"); syncSettings(); await Promise.all([loadDiagnostics(), loadCloudStatus()]); }
     });
   }
@@ -324,12 +326,38 @@
     const count = state.exports.size; $("#export-selection-count").textContent = `${count} fichier${count > 1 ? "s" : ""} prêt${count > 1 ? "s" : ""} sélectionné${count > 1 ? "s" : ""}`;
     $("#prepare-export").disabled = !count; $("#prepare-export").textContent = $("#export-make-zip").checked ? `Créer le ZIP de ${count} fichier${count > 1 ? "s" : ""} ↓` : `Créer le dossier de ${count} fichier${count > 1 ? "s" : ""} →`;
   }
+  async function loadExportHistory() {
+    const result = await api("/api/exports");
+    state.exportHistory = (result.items || []).filter((item) => typeof item.id === "string" && /^[0-9a-f]{32}$/i.test(item.id) && item.download_url === `/api/exports/${item.id}/zip`);
+    renderExportHistory();
+  }
+  function renderExportHistory() {
+    const target = $("#export-history"); target.replaceChildren();
+    const items = state.exportHistory || [];
+    pageItems(items, "pack-history", target, renderExportHistory).items.forEach((item) => {
+      const row = el("article", "export-history-row"), content = el("div", "export-history-copy");
+      const date = new Date(item.created_at), label = Number.isNaN(date.getTime()) ? "Pack ZIP prêt" : `Pack du ${date.toLocaleString("fr", { dateStyle: "medium", timeStyle: "short" })}`;
+      content.append(el("strong", "", label), el("p", "muted", `${item.count == null ? "Archive ZIP" : `${number(item.count)} fichier${item.count > 1 ? "s" : ""}`} · ${size(item.size)}`));
+      const warnings = (Array.isArray(item.warnings) ? item.warnings : []).filter((warning) => typeof warning === "string");
+      if (warnings.length) { const details = el("details", "export-history-warnings"); details.append(el("summary", "", `${number(warnings.length)} point${warnings.length > 1 ? "s" : ""} à vérifier`)); warnings.slice(0, 3).forEach((warning) => details.append(el("p", "muted", warning))); if (warnings.length > 3) details.append(el("p", "muted", "Les autres points sont conservés dans le manifeste du ZIP.")); content.append(details); }
+      const actions = el("div", "button-row"), download = el("a", "button primary small", "Télécharger ce ZIP ↓"); download.href = item.download_url; download.download = ""; download.dataset.historyExportId = item.id;
+      const share = button("Partager sur mon Wi-Fi", () => work(null, () => openTransfer(item.id))); share.dataset.historyShareId = item.id; actions.append(download, share); row.append(content, actions); target.append(row);
+    });
+    if (!items.length) target.append(el("p", "empty-inline", "Aucun ZIP prêt enregistré pour le moment. Créez un pack avec les fichiers disponibles ; il apparaîtra ici."));
+  }
   function diagnosticRows(target, data) {
     target.replaceChildren(); const names = { python: "Python", yt_dlp: "yt-dlp", yt_dlp_ejs: "Composants YouTube JavaScript", ffmpeg: "FFmpeg", ffprobe: "ffprobe", javascript: "Moteur JavaScript", writeable: "Droits d’écriture", writable: "Droits d’écriture", disk: "Espace disque", queue: "File de travail", offline: "Mode hors ligne", configured: "Connexion configurée", url: "Projet Supabase", last_sync: "Dernière récupération", status: "État", guest: "Service invités", admin: "Administration", cloud: "Site public" };
     Object.entries(data).forEach(([key, value]) => { const row = el("div", "diagnostic-row"); row.append(el("strong", "", names[key] || key.replaceAll("_", " "))); let text; if (value && typeof value === "object") text = Object.entries(value).filter(([k]) => !["secret", "password", "token", "service_key", "anon_key", "publicKey"].includes(k)).map(([k, v]) => `${k.replaceAll("_", " ")} : ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "); else text = value === true ? "Oui" : value === false ? "Non" : value == null ? "Non renseigné" : String(value); row.append(el("span", "", text)); target.append(row); });
   }
   async function loadDiagnostics() { diagnosticRows($("#diagnostics-list"), await api("/api/diagnostics")); }
-  async function loadCloudStatus() { try { diagnosticRows($("#cloud-status"), await api("/api/cloud/status")); } catch (error) { feedback($("#cloud-status"), error.status === 404 ? "La synchronisation cloud n’est pas disponible dans cette version du serveur." : error.message, "warning"); } }
+  async function loadCloudStatus() {
+    try {
+      const data = await api("/api/cloud/status"); diagnosticRows($("#cloud-status"), data);
+      if (!cloudConfigDirty && !cloudConfigPending) $("#cloud-project-url").value = data.url || "";
+      $("#cloud-key-help").textContent = data.secret_present ? "Une clé privée est déjà enregistrée sur ce PC. Laissez ce champ vide pour la conserver." : "Collez la clé privée de votre projet pour connecter le studio.";
+      $("#cloud-sync").disabled = $("#cloud-publish").disabled = !data.configured || cloudConfigPending;
+    } catch (error) { feedback($("#cloud-status"), error.status === 404 ? "La synchronisation cloud n’est pas disponible dans cette version du serveur." : error.message, "warning"); }
+  }
 
   document.querySelectorAll("[data-view]").forEach((node) => node.addEventListener("click", () => navigate(node.dataset.view)));
   document.querySelectorAll("[data-go]").forEach((node) => node.addEventListener("click", () => navigate(node.dataset.go)));
@@ -403,10 +431,28 @@
   $("#audio-import-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const data = new FormData(); data.append("file", $("#audio-file").files[0]); data.append("title", $("#audio-title").value.trim()); data.append("artist", $("#audio-artist").value.trim()); feedback($("#audio-import-feedback"), "Copie et vérification du fichier…"); const result = await api("/api/library/import", { method: "POST", body: data }); if (result.item?.id) state.exports.add(result.item.id); $("#audio-import-dialog").close(); await loadLibrary(); toast("Votre fichier audio est disponible."); }, $("#audio-import-feedback")); });
   $("#export-select-all").addEventListener("click", () => { exportItems().forEach((item) => state.exports.add(item.id)); renderExportSelection(); }); $("#export-select-none").addEventListener("click", () => { state.exports.clear(); renderExportSelection(); });
   $("#export-make-zip").addEventListener("change", exportSelectionCount);
-  $("#prepare-export").addEventListener("click", (event) => work(event.currentTarget, async () => { feedback($("#export-result"), "Création et contrôle du pack…"); const result = await api("/api/exports", { method: "POST", body: { source_ids: Array.from(state.exports), make_zip: $("#export-make-zip").checked } }), target = $("#export-result"); target.replaceChildren(); target.append(el("p", "feedback success", `${result.count} fichier(s) prêt(s) dans le pack · ${size(result.size)}`)); if (result.directory) target.append(el("p", "export-path", `Dossier créé sur ce PC : ${result.directory}`)); (result.warnings || []).forEach((warning) => target.append(el("p", "feedback warning", warning))); if (result.download_url && result.download_url.startsWith("/api/exports/")) { const link = el("a", "button primary full-width", "Télécharger le ZIP sur cet appareil ↓"); link.href = result.download_url; link.download = ""; target.append(link); const share = button("Partager sur mon Wi-Fi", () => work(null, () => openTransfer(result.id)), "button subtle full-width"); share.id = "share-export"; target.append(share); } target.append(el("p", "field-help", "Votre navigateur enregistre le ZIP dans Téléchargements ou vous propose un dossier. Pour un téléphone ou une tablette, choisissez le partage Wi-Fi et scannez son QR code. Gardez audio/ et les playlists ensemble après extraction.")); }, $("#export-result")));
+  $("#refresh-export-history").addEventListener("click", (event) => work(event.currentTarget, loadExportHistory, $("#export-history-feedback")));
+  $("#prepare-export").addEventListener("click", (event) => work(event.currentTarget, async () => { feedback($("#export-result"), "Création et contrôle du pack…"); const result = await api("/api/exports", { method: "POST", body: { source_ids: Array.from(state.exports), make_zip: $("#export-make-zip").checked } }), target = $("#export-result"); target.replaceChildren(); target.append(el("p", "feedback success", `${result.count} fichier(s) prêt(s) dans le pack · ${size(result.size)}`)); if (result.directory) target.append(el("p", "export-path", `Dossier créé sur ce PC : ${result.directory}`)); (result.warnings || []).forEach((warning) => target.append(el("p", "feedback warning", warning))); if (result.download_url && result.download_url.startsWith("/api/exports/")) { const link = el("a", "button primary full-width", "Télécharger le ZIP sur cet appareil ↓"); link.href = result.download_url; link.download = ""; target.append(link); const share = button("Partager sur mon Wi-Fi", () => work(null, () => openTransfer(result.id)), "button subtle full-width"); share.id = "share-export"; target.append(share); } target.append(el("p", "field-help", "Votre navigateur enregistre le ZIP dans Téléchargements ou vous propose un dossier. Pour un téléphone ou une tablette, choisissez le partage Wi-Fi et scannez son QR code. Gardez audio/ et les playlists ensemble après extraction.")); try { await loadExportHistory(); } catch { feedback($("#export-history-feedback"), "Le pack est créé. Actualisez les packs pour retrouver son lien ici.", "warning"); } }, $("#export-result")));
   $("#settings-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const body = {}; ["event_name", "public_url", "local_url", "output_format"].forEach((key) => { body[key] = $(`#setting-${key.replaceAll("_", "-")}`).value.trim(); }); ["max_proposals", "max_playlist_items"].forEach((key) => { body[key] = Number($(`#setting-${key.replaceAll("_", "-")}`).value); }); ["proposals_open", "votes_open", "offline_mode", "invitation_required"].forEach((key) => { body[key] = $(`#setting-${key.replaceAll("_", "-")}`).checked; }); state.settings = await api("/api/settings", { method: "PATCH", body }); syncSettings(); toast("Réglages enregistrés."); }); });
   $("#invitation-form").addEventListener("submit", (event) => { event.preventDefault(); work(event.submitter, async () => { const data = await api("/api/invitations", { method: "POST", body: { count: Number($("#invitation-count").value) } }); $("#invitation-codes").value = (data.codes || []).join("\n"); $("#invitation-codes").classList.remove("hidden"); toast("Codes créés. Copiez-les avant de quitter cet écran."); }); });
   $("#refresh-diagnostics").addEventListener("click", (event) => work(event.currentTarget, loadDiagnostics));
+  ["#cloud-project-url", "#cloud-private-key"].forEach((selector) => $(selector).addEventListener("input", () => { cloudConfigDirty = true; }));
+  $("#cloud-config-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); if (cloudConfigPending) return;
+    cloudConfigPending = true; $("#cloud-config-submit").disabled = $("#cloud-project-url").disabled = $("#cloud-private-key").disabled = true;
+    $("#cloud-sync").disabled = $("#cloud-publish").disabled = true;
+    feedback($("#cloud-config-feedback"), "Vérification de la connexion au projet…");
+    try {
+      const body = { project_url: $("#cloud-project-url").value.trim() }, key = $("#cloud-private-key").value.trim(); if (key) body.key = key;
+      const result = await api("/api/cloud/configure", { method: "POST", body });
+      $("#cloud-private-key").value = ""; cloudConfigDirty = false; $("#cloud-project-url").value = result.url || body.project_url;
+      feedback($("#cloud-config-feedback"), result.message || "Connexion enregistrée. Vous pouvez récupérer les propositions du site public maintenant.", "success");
+    } catch (error) { feedback($("#cloud-config-feedback"), error.message, "error"); }
+    finally {
+      cloudConfigPending = false; $("#cloud-config-submit").disabled = $("#cloud-project-url").disabled = $("#cloud-private-key").disabled = false;
+      await loadCloudStatus();
+    }
+  });
   $("#cloud-sync").addEventListener("click", (event) => work(event.currentTarget, async () => { feedback($("#cloud-feedback"), "Récupération des propositions et des votes du site public…"); const data = await api("/api/cloud/sync", { method: "POST", body: {} }); feedback($("#cloud-feedback"), data.message || `Récupération terminée : ${data.proposals ?? data.imported ?? 0} proposition(s), ${data.votes ?? 0} vote(s).`, "success"); await loadCloudStatus(); }, $("#cloud-feedback")));
   $("#cloud-publish").addEventListener("click", (event) => work(event.currentTarget, async () => { feedback($("#cloud-feedback"), "Publication des réglages et de la modération sur le site public…"); const data = await api("/api/cloud/publish", { method: "POST", body: {} }); feedback($("#cloud-feedback"), data.message || "Réglages et modération publiés sur le site public.", "success"); await loadCloudStatus(); }, $("#cloud-feedback")));
   async function boot() { try { state.session = await api("/api/session"); if (state.session.authenticated) await showStudio(); else showLogin(); } catch (error) { feedback($("#login-feedback"), error.message, "error"); } }

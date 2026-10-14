@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
-from . import db
+from . import categories as category_store, db
 from .providers import SourceError, parse_youtube_url
 
 PUBLISH_BATCH_SIZE = 1000
@@ -156,6 +156,26 @@ def _validate(snapshot):
         rows = snapshot.get(name)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise CloudSyncError("Catalogue distant incomplet. Aucun changement local effectué.")
+    categories = None
+    if "categories" in snapshot:
+        if not isinstance(snapshot["categories"], list):
+            raise CloudSyncError("Catalogue de catégories distant invalide.")
+        categories = []
+        for row in snapshot["categories"]:
+            if not isinstance(row, dict):
+                raise CloudSyncError("Catégorie distante invalide.")
+            try:
+                category_id = category_store.ids([row.get("id")])[0]
+                name = category_store.clean_name(_text(row.get("name"), 80, required=True))
+            except ValueError:
+                raise CloudSyncError("Catégorie distante invalide.") from None
+            order, active = row.get("sort_order", 0), row.get("active")
+            if type(order) is not int or not 0 <= order <= 2147483647 or type(active) is not bool:
+                raise CloudSyncError("Catégorie distante invalide.")
+            categories.append({"id": category_id, "name": name, "sort_order": order, "active": active})
+        if len({row["id"] for row in categories}) != len(categories):
+            raise CloudSyncError("Catégories distantes dupliquées.")
+    category_ids = {row["id"] for row in categories or []}
     guests = []
     for row in snapshot["guests"]:
         guests.append({"id": _guest_identifier(row.get("id")),
@@ -212,6 +232,14 @@ def _validate(snapshot):
         proposals.append({"id": _identifier(row.get("id")), "source_id": sid, "guest_id": gid,
                           "state": "archived" if withdrawn_at else state, "sort_order": sort_order,
                           "withdrawn_at": withdrawn_at, "created_at": _date(row.get("created_at"))})
+        if "category_ids" in row:
+            try:
+                selected = category_store.ids(row["category_ids"])
+            except ValueError:
+                raise CloudSyncError("Catégories de proposition distantes invalides.") from None
+            if any(value not in category_ids for value in selected):
+                raise CloudSyncError("Une proposition référence une catégorie distante absente.")
+            proposals[-1]["category_ids"] = selected
     proposal_ids = {p["id"] for p in proposals}
     if len(proposal_ids) != len(proposals):
         raise CloudSyncError("Propositions distantes dupliquées.")
@@ -222,13 +250,13 @@ def _validate(snapshot):
             raise CloudSyncError("Vote distant incohérent.")
         vote_keys.add((pid, gid))
         votes.append({"proposal_id": pid, "guest_id": gid, "created_at": _date(row.get("created_at"))})
-    return guests, sources, proposals, votes
+    return guests, sources, proposals, votes, categories
 
 
 def import_snapshot(cfg, conn, snapshot):
     """Validate first, then atomically replace this project's cloud votes only."""
     project = _project(cfg)
-    guests, sources, proposals, votes = _validate(snapshot)
+    guests, sources, proposals, votes, categories = _validate(snapshot)
     maps = {}
     for row in conn.execute("SELECT kind,remote_id,local_id FROM cloud_map"):
         if row["remote_id"].startswith(project + ":"):
@@ -242,6 +270,16 @@ def import_snapshot(cfg, conn, snapshot):
     new_sources = new_proposals = 0
     conn.execute("SAVEPOINT playlist25_cloud_sync")
     try:
+        for row in categories or []:
+            existing = conn.execute("SELECT dirty,cloud_project FROM categories WHERE id=?", (row["id"],)).fetchone()
+            if existing and existing["dirty"]:
+                continue
+            if existing and existing["cloud_project"] not in {"", project}:
+                raise CloudSyncError("Cette catégorie appartient déjà à un autre projet. Aucun changement local effectué.")
+            conn.execute("""INSERT INTO categories(id,name,sort_order,active,dirty,cloud_project) VALUES(?,?,?,?,0,?)
+                ON CONFLICT(id) DO UPDATE SET name=excluded.name,sort_order=excluded.sort_order,
+                active=excluded.active,cloud_project=excluded.cloud_project""",
+                         (row["id"], row["name"], row["sort_order"], int(row["active"]), project))
         for row in guests:
             gid = "cloud:" + project + ":" + row["id"]
             conn.execute("INSERT INTO guests(id,nickname,created_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET nickname=excluded.nickname",
@@ -266,6 +304,15 @@ def import_snapshot(cfg, conn, snapshot):
             new_sources += int(not already_exists and not playlist)
         active_remote_locals = {mapped("proposal", row["id"]) for row in proposals
                                 if row["withdrawn_at"] is None and row["state"] in {"pending", "approved"}}
+        categories_applied = set()
+        def apply_categories(pid, row):
+            if "category_ids" not in row or str(pid) in categories_applied:
+                return
+            if str(pid) in active_remote_locals and (row["withdrawn_at"] or row["state"] not in {"pending", "approved"}):
+                return
+            conn.execute("UPDATE proposals SET category_ids=? WHERE id=? AND categories_dirty=0",
+                         (json.dumps(row["category_ids"], separators=(",", ":")), pid))
+            categories_applied.add(str(pid))
         # First record withdrawals so re-additions can use a fresh proposal ID.
         for row in sorted(proposals, key=lambda item: (item["withdrawn_at"] is None, item["id"])):
             pid = mapped("proposal", row["id"])
@@ -275,6 +322,7 @@ def import_snapshot(cfg, conn, snapshot):
                     if pid not in active_remote_locals:
                         conn.execute("UPDATE proposals SET state='archived',withdrawn_at=COALESCE(withdrawn_at,?) WHERE id=?",
                                      (row["withdrawn_at"], pid))
+                apply_categories(pid, row)
                 continue
             sid = mapped("source", row["source_id"])
             existing = None if row["withdrawn_at"] else conn.execute(
@@ -287,6 +335,7 @@ def import_snapshot(cfg, conn, snapshot):
                 pid = cursor.lastrowid
                 new_proposals += 1
             remember("proposal", row["id"], pid)
+            apply_categories(pid, row)
         # DELETE is narrowly limited to imported votes, never audio/proposals/guests.
         # Includes old mapped rows if a cloud vote was removed since the prior pull.
         prefix = project + ":"
@@ -321,6 +370,70 @@ def pull(cfg, conn):
     if db.get_setting(conn, "offline_mode", False):
         raise CloudSyncError("Désactivez temporairement le mode soirée hors ligne pour récupérer la collecte Internet.")
     return import_snapshot(cfg, conn, fetch_snapshot(cfg))
+
+
+def publish_categories(cfg, conn):
+    """Publish only explicit pending category edits, apart from moderation."""
+    if db.get_setting(conn, "offline_mode", False):
+        raise CloudSyncError("Désactivez le mode hors ligne pour publier les catégories.")
+    project = _project(cfg)
+    catalogue = category_store.catalogue(conn)
+    known_ids = {row["id"] for row in catalogue}
+    # Publish explicit archives before later batches reuse those names.
+    pending_categories = [dict(row) for row in conn.execute("SELECT id,name,sort_order,active FROM categories WHERE dirty=1 ORDER BY active,id")]
+    for row in pending_categories:
+        try:
+            category_store.ids([row["id"]])
+            row["name"] = category_store.clean_name(row["name"])
+        except ValueError as error:
+            raise CloudSyncError(str(error)) from None
+        if type(row["sort_order"]) is not int or not 0 <= row["sort_order"] <= 2147483647 or row["active"] not in (0, 1):
+            raise CloudSyncError("Une catégorie locale est invalide. Corrigez-la avant de publier.")
+        row["active"] = bool(row["active"])
+    assignments = []
+    withdrawn = {str(value) for value in db.get_setting(conn, "cloud_withdrawn_remote_" + project, []) if type(value) is int}
+    rows = conn.execute("""SELECT m.remote_id,p.id,p.category_ids FROM cloud_map m
+        JOIN proposals p ON p.id=CAST(m.local_id AS INTEGER)
+        WHERE m.kind='proposal' AND substr(m.remote_id,1,length(?))=?
+        AND p.categories_dirty=1 AND p.withdrawn_at IS NULL ORDER BY m.remote_id""", (project + ":", project + ":"))
+    for row in rows:
+        remote = row["remote_id"].split(":", 1)[1]
+        if remote in withdrawn:
+            continue
+        try:
+            selected = category_store.ids(json.loads(row["category_ids"]))
+        except (ValueError, TypeError):
+            raise CloudSyncError("Une sélection locale de catégories est invalide.") from None
+        if any(value not in known_ids for value in selected):
+            raise CloudSyncError("Une sélection locale référence une catégorie absente.")
+        assignments.append({"id": _identifier(int(remote)), "category_ids": selected, "local_id": row["id"], "local_json": row["category_ids"]})
+    # Everything is validated before the first RPC. Acknowledge only the exact
+    # values sent, so edits made while the network responds remain pending.
+    counts = {"updated_categories": 0, "updated_assignments": 0}
+    for kind, values in (("categories", pending_categories), ("assignments", assignments)):
+        for offset in range(0, len(values), PUBLISH_BATCH_SIZE):
+            batch = values[offset:offset + PUBLISH_BATCH_SIZE]
+            payload = [{key: value for key, value in row.items() if key not in {"local_id", "local_json"}} for row in batch]
+            try:
+                result = _rpc(cfg, "playlist25_admin_categories", {
+                    "p_categories": payload if kind == "categories" else [],
+                    "p_assignments": payload if kind == "assignments" else []})
+                expected = "updated_" + kind
+                if not isinstance(result, dict) or type(result.get(expected)) is not int or result[expected] != len(batch):
+                    raise CloudSyncError("Réponse de publication des catégories invalide.")
+            except CloudSyncError as error:
+                if any(counts.values()):
+                    raise CloudSyncError("Publication des catégories interrompue après des lots validés. Relancez la publication pour terminer. " + str(error)) from None
+                raise
+            counts[expected] += len(batch)
+            if kind == "categories":
+                conn.executemany("UPDATE categories SET dirty=0,cloud_project=? WHERE id=? AND name=? AND sort_order=? AND active=?",
+                                 ((project, row["id"], row["name"], row["sort_order"], int(row["active"])) for row in batch))
+    # Clear proposal edits only after every remote mapping was acknowledged.
+    # A single local proposal can represent several moderator-merged rows.
+    conn.executemany("UPDATE proposals SET categories_dirty=0 WHERE id=? AND category_ids=?",
+                     ((row["local_id"], row["local_json"]) for row in assignments))
+    return {**counts, "message": "Catégories publiées. Les autres choix des invités restent conservés."}
 
 
 def _publication_batches(updates, size=PUBLISH_BATCH_SIZE):

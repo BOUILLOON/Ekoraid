@@ -22,15 +22,18 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
 
 from . import db, exports, library, providers
 from .config import Settings
 from .guest_playlists import classify_source
+from .private_config import PrivateConfigError, configure_cloud
 from .security import csrf_token, install_session, rate_limit, require_admin, require_csrf
 from .queue import enqueue_sources, queue_snapshot
 
@@ -46,6 +49,11 @@ class LoginInput(Input):
 class SearchInput(Input):
     query: str = Field(min_length=2, max_length=200)
     offset: StrictInt = Field(default=0, ge=0)
+
+
+class CloudConnectionInput(Input):
+    project_url: StrictStr = Field(min_length=1, max_length=2048)
+    key: StrictStr | None = Field(default=None, max_length=8192)
 
 
 class ProposalPatch(Input):
@@ -415,6 +423,22 @@ def create_admin_app(cfg: Settings) -> FastAPI:
     protected = [Depends(admin)]
     modifying = [Depends(mutation)]
 
+    @app.exception_handler(RequestValidationError)
+    async def private_input_error(request: Request, error: RequestValidationError):
+        if request.url.path == "/api/cloud/configure":
+            # Pydantic errors normally echo rejected input; this input can be a
+            # private credential, including an invalid or oversized one.
+            return JSONResponse({"detail": "Indiquez l’adresse HTTPS du projet et une clé privée sur une seule ligne. Laissez la clé vide pour conserver celle déjà configurée."}, status_code=422)
+        return await request_validation_exception_handler(request, error)
+
+    @app.post("/api/cloud/configure", dependencies=modifying)
+    def cloud_configure(request: Request, payload: CloudConnectionInput) -> dict[str, Any]:
+        rate_limit(request, "admin_cloud_configure", 10, window=60)
+        try:
+            return configure_cloud(cfg, payload.project_url, payload.key)
+        except PrivateConfigError as error:
+            raise HTTPException(error.status, str(error)) from None
+
     def cache_analysis(request: Request, result: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(result)
         if not isinstance(result.get("entries"), list):
@@ -611,8 +635,28 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                 if key == "title" and not changes[key]:
                     raise HTTPException(422, "Le titre est obligatoire.")
         warnings: list[str] = []
-        with _connection(cfg) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        resolved_entry = None
+        if "url" in changes:
+            # A remote lookup must not hold SQLite's writer lock. Re-read and
+            # validate the proposal inside the transaction after it completes.
+            with _connection(cfg) as preview:
+                if not preview.execute("SELECT 1 FROM proposals WHERE id=?", (proposal_id,)).fetchone():
+                    raise HTTPException(404, "Proposition introuvable.")
+                _online(preview)
+                effective = _effective_cfg(preview, cfg)
+            try:
+                result = providers.analyze(changes["url"], effective, mode="video")
+            except ValueError as exc:
+                raise _provider_error(exc) from exc
+            entries = [entry for entry in result.get("entries", []) if isinstance(entry, dict) and entry.get("available")]
+            if result.get("kind") not in ("video", "single") or len(entries) != 1:
+                raise HTTPException(422, "Associez une vidéo précise à cette proposition.")
+            resolved_entry = entries[0]
+            parsed = providers.parse_youtube_url(resolved_entry.get("url", ""), mode="video")
+            if not parsed.get("video_id") or parsed["video_id"] != resolved_entry.get("video_id"):
+                raise HTTPException(502, "La source résolue est invalide.")
+            resolved_entry["url"] = parsed["url"]
+        with _connection(cfg) as conn, library.file_transaction(conn):
             proposal = conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
             if not proposal:
                 raise HTTPException(404, "Proposition introuvable.")
@@ -622,19 +666,7 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             source_id = proposal["source_id"]
             if "url" in changes:
                 _online(conn)
-                try:
-                    result = providers.analyze(changes["url"], _effective_cfg(conn, cfg), mode="video")
-                except ValueError as exc:
-                    raise _provider_error(exc) from exc
-                entries = [entry for entry in result.get("entries", []) if entry.get("available")]
-                if result.get("kind") not in ("video", "single") or len(entries) != 1:
-                    raise HTTPException(422, "Associez une vidéo précise à cette proposition.")
-                entry = entries[0]
-                parsed = providers.parse_youtube_url(entry.get("url", ""), mode="video")
-                if not parsed.get("video_id") or parsed["video_id"] != entry.get("video_id"):
-                    raise HTTPException(502, "La source résolue est invalide.")
-                entry["url"] = parsed["url"]
-                source_id = db.upsert_source(conn, entry)
+                source_id = db.upsert_source(conn, resolved_entry)
                 conflict = conn.execute("SELECT id FROM proposals WHERE source_id=? AND guest_id IS ? AND id<>?", (source_id, proposal["guest_id"], proposal_id)).fetchone()
                 if conflict:
                     raise HTTPException(409, {"message": "Cette personne a déjà une proposition pour cette source. Fusionnez après confirmation.", "duplicate_id": conflict["id"]})
@@ -664,7 +696,6 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                     conn.execute("UPDATE sources SET title=?,artist=? WHERE id=?", (title, artist, source_id))
             conn.execute("UPDATE proposals SET source_id=?,state=?,sort_order=? WHERE id=?",
                          (source_id, changes.get("state", proposal["state"]), changes.get("sort_order", proposal["sort_order"]), proposal_id))
-            conn.commit()
             item = next(item for item in db.list_proposals(conn, include_hidden=True) if item["id"] == proposal_id)
             return {"item": item, "warnings": warnings}
 
@@ -949,9 +980,8 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                 raise HTTPException(422, "Le fichier est vide.")
 
             def import_file() -> dict[str, Any]:
-                with _connection(cfg) as conn:
+                with _connection(cfg) as conn, library.file_transaction(conn):
                     imported = library.import_audio(conn, cfg, temporary, title=title, artist=artist)
-                    conn.commit()
                     return imported
 
             try:
@@ -968,7 +998,7 @@ def create_admin_app(cfg: Settings) -> FastAPI:
         changes = payload.model_dump(exclude_unset=True)
         if not changes or any(value is None for value in changes.values()):
             raise HTTPException(422, "Indiquez un titre ou un artiste valide.")
-        with _connection(cfg) as conn:
+        with _connection(cfg) as conn, library.file_transaction(conn):
             source = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
             if not source or not _present(conn, cfg, source):
                 raise HTTPException(404, "Ce morceau ne possède pas de fichier local disponible.")
@@ -980,7 +1010,6 @@ def create_admin_app(cfg: Settings) -> FastAPI:
                 item = library.rename_audio(conn, cfg, source_id, title, artist)
             except (ValueError, OSError) as exc:
                 raise HTTPException(422, str(exc)) from exc
-            conn.commit()
             return {"item": item}
 
     @app.get("/api/library/{source_id}/audio", dependencies=protected)
@@ -1010,19 +1039,25 @@ def create_admin_app(cfg: Settings) -> FastAPI:
             conn.commit()
             return pack
 
-    @app.get("/api/exports/{export_id}/zip", dependencies=protected)
-    def export_download(export_id: str) -> FileResponse:
+    @app.get("/api/exports", dependencies=protected)
+    def export_history() -> dict[str, Any]:
+        with _connection(cfg) as conn:
+            return {"items": exports.list_ready_packs(conn, cfg)}
+
+    @app.api_route("/api/exports/{export_id}/zip", methods=["GET", "HEAD"], dependencies=protected)
+    def export_download(export_id: str, request: Request) -> Response:
         if not export_id or len(export_id) > 80 or any(char not in "0123456789abcdef-" for char in export_id):
             raise HTTPException(404, "Export introuvable.")
         with _connection(cfg) as conn:
             row = conn.execute("SELECT archive FROM exports WHERE id=?", (export_id,)).fetchone()
         if not row or not row["archive"]:
             raise HTTPException(404, "Cet export ne possède pas d'archive ZIP.")
-        path = Path(row["archive"]).resolve()
-        root = cfg.export_dir.resolve()
-        if not path.is_relative_to(root) or not path.is_file() or path.suffix.lower() != ".zip":
-            raise HTTPException(404, "L'archive ZIP n'est plus disponible.")
-        return FileResponse(path, media_type="application/zip", filename=f"Anniversaire25-{export_id[:8]}.zip")
+        from .transfers import TransferError, _open_archive, archive_response
+        try:
+            _path, file, metadata = _open_archive(cfg, row["archive"])
+        except (TransferError, OSError):
+            raise HTTPException(404, "L'archive ZIP n'est plus disponible.") from None
+        return archive_response(request, file, metadata, f"Anniversaire25-{export_id[:8]}.zip")
 
     @app.get("/api/catalogue", dependencies=protected)
     def catalogue(format: str = "json") -> Response:
@@ -1037,4 +1072,6 @@ def create_admin_app(cfg: Settings) -> FastAPI:
     def diagnostics() -> dict[str, Any]:
         return _diagnostics(cfg)
 
+    from .categories import register_admin_categories
+    register_admin_categories(app, cfg)
     return app

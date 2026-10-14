@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from . import db, providers
+from . import categories, db, providers
 from .guest_playlists import classify_source, prepare_youtube_proposal
 from .security import csrf_token, install_session, rate_limit, require_csrf
 
@@ -60,6 +60,7 @@ _PUBLIC_FIELDS = (
     "id", "source_id", "nickname", "state", "sort_order", "title", "artist",
     "channel", "duration", "thumbnail", "url", "video_id", "status", "votes",
     "voted", "created_at", "mine", "avatar_id", "avatar_version", "source_kind",
+    "category_ids",
 )
 _EXTERNAL_SLOTS = threading.BoundedSemaphore(4)
 
@@ -405,7 +406,17 @@ def create_guest_app(cfg) -> FastAPI:
                 items.sort(key=lambda item: (item.get("created_at") or "", item["id"]), reverse=True)
             else:
                 items.sort(key=lambda item: (-int(item.get("votes") or 0), item["id"]))
-            return {"items": [_public(item) for item in items]}
+            return {"items": [_public(item) for item in items], "categories": categories.catalogue(conn)}
+
+    @app.patch("/api/proposals/{proposal_id}/categories")
+    def proposal_categories(proposal_id: int, payload: categories.CategoryIds, request: Request):
+        require_csrf(request)
+        rate_limit(request, "proposal_categories", 30)
+        with _connection(cfg) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            guest = _guest(conn, request)
+            item = categories.assign(conn, proposal_id, payload.category_ids, owner_id=guest["id"])
+            return {"item": _public(item)}
 
     @app.get("/api/search")
     def search(request: Request, q: str = Query(min_length=2, max_length=180),

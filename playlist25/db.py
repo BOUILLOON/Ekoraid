@@ -9,7 +9,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS guests(id TEXT PRIMARY KEY,nickname TEXT NOT NULL,created_at TEXT NOT NULL,avatar_data TEXT NOT NULL DEFAULT '',avatar_version TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS invitations(code_hash TEXT PRIMARY KEY,guest_id TEXT UNIQUE REFERENCES guests(id),created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY,video_id TEXT UNIQUE,url TEXT,title TEXT NOT NULL,artist TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',duration REAL,thumbnail TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',file_path TEXT,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS proposals(id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL REFERENCES sources(id),guest_id TEXT REFERENCES guests(id),state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','rejected','archived')),sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,withdrawn_at TEXT);
+CREATE TABLE IF NOT EXISTS proposals(id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL REFERENCES sources(id),guest_id TEXT REFERENCES guests(id),state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','rejected','archived')),sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,withdrawn_at TEXT,category_ids TEXT NOT NULL DEFAULT '[]',categories_dirty INTEGER NOT NULL DEFAULT 0 CHECK(categories_dirty IN (0,1)));
+CREATE TABLE IF NOT EXISTS categories(id TEXT PRIMARY KEY,name TEXT NOT NULL,sort_order INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),dirty INTEGER NOT NULL DEFAULT 0 CHECK(dirty IN (0,1)),cloud_project TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS votes(proposal_id INTEGER NOT NULL REFERENCES proposals(id),guest_id TEXT NOT NULL REFERENCES guests(id),created_at TEXT NOT NULL,PRIMARY KEY(proposal_id,guest_id));
 CREATE TABLE IF NOT EXISTS playlists(id INTEGER PRIMARY KEY,title TEXT NOT NULL,source_url TEXT,analysis_complete INTEGER NOT NULL,warnings TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS playlist_entries(playlist_id INTEGER NOT NULL REFERENCES playlists(id),position INTEGER NOT NULL,source_id INTEGER REFERENCES sources(id),title TEXT NOT NULL,available INTEGER NOT NULL,reason TEXT NOT NULL DEFAULT '',selected INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(playlist_id,position));
@@ -52,17 +53,20 @@ def _migrate_withdrawals(conn):
             if index["origin"] == "u" and names == ["source_id", "guest_id"]:
                 legacy_unique = True
         if "withdrawn_at" not in columns or legacy_unique:
-            known = {"id", "source_id", "guest_id", "state", "sort_order", "created_at", "withdrawn_at"}
+            known = {"id", "source_id", "guest_id", "state", "sort_order", "created_at", "withdrawn_at", "category_ids", "categories_dirty"}
             if columns - known:
                 raise RuntimeError("La table des propositions contient des colonnes personnalisées : migration interrompue pour préserver vos données.")
             conn.execute("""CREATE TABLE proposals_withdrawal_migration(
                 id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL REFERENCES sources(id),
                 guest_id TEXT REFERENCES guests(id),state TEXT NOT NULL DEFAULT 'pending'
                 CHECK(state IN ('pending','approved','rejected','archived')),
-                sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,withdrawn_at TEXT)""")
+                sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,withdrawn_at TEXT,
+                category_ids TEXT NOT NULL DEFAULT '[]',categories_dirty INTEGER NOT NULL DEFAULT 0 CHECK(categories_dirty IN (0,1)))""")
             audit = "withdrawn_at" if "withdrawn_at" in columns else "NULL"
+            categories = "category_ids" if "category_ids" in columns else "'[]'"
+            dirty = "categories_dirty" if "categories_dirty" in columns else "0"
             conn.execute(f"""INSERT INTO proposals_withdrawal_migration
-                SELECT id,source_id,guest_id,state,sort_order,created_at,{audit} FROM proposals""")
+                SELECT id,source_id,guest_id,state,sort_order,created_at,{audit},{categories},{dirty} FROM proposals""")
             conn.execute("DROP TABLE proposals")
             conn.execute("ALTER TABLE proposals_withdrawal_migration RENAME TO proposals")
             if conn.execute("PRAGMA foreign_key_check").fetchone():
@@ -85,6 +89,11 @@ def init_db(cfg: Settings):
             for name in ('avatar_data', 'avatar_version'):
                 if name not in guest_columns:
                     conn.execute(f"ALTER TABLE guests ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            proposal_columns = {row['name'] for row in conn.execute('PRAGMA table_info(proposals)')}
+            if 'category_ids' not in proposal_columns:
+                conn.execute("ALTER TABLE proposals ADD COLUMN category_ids TEXT NOT NULL DEFAULT '[]'")
+            if 'categories_dirty' not in proposal_columns:
+                conn.execute("ALTER TABLE proposals ADD COLUMN categories_dirty INTEGER NOT NULL DEFAULT 0 CHECK(categories_dirty IN (0,1))")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS proposals_owner_source_live_idx ON proposals(source_id,guest_id) WHERE withdrawn_at IS NULL")
             defaults = {"event_name":cfg.event_name,"proposals_open":True,"votes_open":True,"offline_mode":False,"invitation_required":False,"public_url":cfg.public_url,"local_url":cfg.local_url,"max_proposals":cfg.max_proposals,"max_playlist_items":cfg.max_playlist_items,"output_format":cfg.output_format,"queue_paused":False}
             for key, value in defaults.items():
@@ -120,7 +129,7 @@ def upsert_source(conn, entry):
     return cursor.lastrowid
 
 def list_proposals(conn, guest_id=None, include_hidden=False):
-    query = """SELECT p.id,p.source_id,p.guest_id,p.state,p.sort_order,p.created_at,p.withdrawn_at,
+    query = """SELECT p.id,p.source_id,p.guest_id,p.state,p.sort_order,p.created_at,p.withdrawn_at,p.category_ids,
        g.id AS avatar_id,COALESCE(g.avatar_version,'') AS avatar_version,
        COALESCE(g.nickname,'Administration') AS nickname,s.video_id,s.url,s.title,s.artist,s.channel,s.duration,s.thumbnail,s.status,s.file_path,
        (SELECT count(*) FROM votes v WHERE v.proposal_id=p.id) AS votes,
@@ -128,4 +137,9 @@ def list_proposals(conn, guest_id=None, include_hidden=False):
        FROM proposals p JOIN sources s ON s.id=p.source_id LEFT JOIN guests g ON g.id=p.guest_id"""
     if not include_hidden: query += " WHERE p.state IN ('pending','approved')"
     query += " ORDER BY p.sort_order,p.created_at,p.id"
-    return [dict(row) for row in conn.execute(query,(guest_id or "",))]
+    result = []
+    for row in conn.execute(query,(guest_id or "",)):
+        item = dict(row)
+        item['category_ids'] = json.loads(item['category_ids'])
+        result.append(item)
+    return result

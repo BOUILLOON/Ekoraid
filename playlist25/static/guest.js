@@ -5,6 +5,8 @@
   const state = { session: null, items: [], mine: false, query: "", sort: "popular", page: 1, identityResolve: null, searchSerial: 0, searchTimer: null, searchController: null, searchItems: [], catalogueSerial: 0, linkCheckTimer: null, lastCheckedLink: "", proposalPending: false, manualMatchResolve: null, withdrawing: null, withdrawalPending: false, profileSerial: 0, profileAvatar: "", profileDirty: false, profileProcessing: false, profilePending: false, proposalScopeResolve: null };
   const PAGE_SIZE = 48;
   Object.assign(state, { catalogueItems: [], catalogueOrder: [], pendingNewCount: 0, searchQuery: "", searchNextOffset: null, searchHasMore: false, searchLoading: false, entry: "search", restoringDraft: false });
+  Object.assign(state, { itemsLoadedAt: null, exportCache: null, exportSerial: 0, exportPending: false, exportController: null, categories: [] });
+  Object.assign(state, { categoryFilter: "", categorySorted: [], organizer: null, organizerMode: "login", organizerPending: false, categoryEditing: null, categoryAssignmentPending: false, managerEditing: null, managerPending: false });
   const sourceMatches = new Map(), manualMatches = new Map();
   const cloud = () => window.PlaylistCloudProvider?.enabled?.() ? window.PlaylistCloudProvider : null;
   const el = (tag, className, value) => {
@@ -71,7 +73,8 @@
   }
   function domKey(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return node.nodeType === Node.TEXT_NODE ? "text" : "other";
-    for (const key of ["proposalId", "searchId", "previewId", "withdrawId", "locateId", "existingVoteId", "addVideoId"]) if (node.dataset[key]) return `${node.tagName}:${key}:${node.dataset[key]}`;
+    if (node.tagName === "OPTION") return `OPTION:${node.value}`;
+    for (const key of ["proposalId", "searchId", "previewId", "withdrawId", "locateId", "existingVoteId", "addVideoId", "categoryProposalId"]) if (node.dataset[key]) return `${node.tagName}:${key}:${node.dataset[key]}`;
     return `${node.tagName}:${node.classList[0] || ""}`;
   }
   function reconcile(parent, incoming) {
@@ -110,6 +113,168 @@
     const tags = el("div", "version-tags");
     versionLabels(title).forEach((label) => { const tag = el("span", "mini-tag version-tag", label); tag.title = `${label} : repère indicatif provenant du titre, à vérifier à l’écoute.`; tag.setAttribute("aria-label", tag.title); tags.append(tag); });
     return tags;
+  }
+  function publicListRows(items, categories = state.categories) {
+    // Explicitly selected fields prevent tokens, profile photos and internal IDs
+    // from entering a file if the server response gains new fields later.
+    const names = new Map((categories || []).filter((category) => typeof category.id === "string" && typeof category.name === "string").map((category) => [category.id, category.name]));
+    return items.map((item) => {
+      const parsed = youtubeSource(item.url), video = youtubeVideoId(item);
+      const playlist = item.source_kind === "playlist" && parsed?.playlist;
+      const url = playlist ? `https://www.youtube.com/playlist?list=${parsed.playlist}` : video ? `https://www.youtube.com/watch?v=${video}` : parsed?.kind === "video" ? `https://www.youtube.com/watch?v=${parsed.video}` : "";
+      return { title: typeof item.title === "string" ? item.title : "", artist: typeof item.artist === "string" ? item.artist : "", url,
+        type: playlist ? "Playlist YouTube" : url ? "Vidéo YouTube" : "Idée sans lien", author: typeof item.nickname === "string" ? item.nickname : "Organisation",
+        votes: Number.isFinite(Number(item.votes)) ? Math.max(0, Math.floor(Number(item.votes))) : 0,
+        duration: item.duration != null && Number.isFinite(Number(item.duration)) && Number(item.duration) > 0 ? Number(item.duration) : "",
+        created_at: typeof item.created_at === "string" ? item.created_at : "", categories: (Array.isArray(item.category_ids) ? item.category_ids : []).map((id) => names.get(id)).filter(Boolean).join(" · ") };
+    });
+  }
+  function cachedPublicList() {
+    if (state.exportCache && (!state.itemsLoadedAt || state.exportCache.loaded_at >= state.itemsLoadedAt)) return state.exportCache;
+    return state.itemsLoadedAt ? { rows: publicListRows(state.items), loaded_at: state.itemsLoadedAt } : null;
+  }
+  const publicSnapshotDate = (value) => new Date(value).toLocaleString("fr", { dateStyle: "long", timeStyle: "short" });
+  function csvCell(value) {
+    let text = String(value ?? "");
+    // Quoting alone does not stop a spreadsheet from interpreting a formula.
+    if (/^[\s\p{Cf}\x00-\x1f]*[=+\-@]/u.test(text)) text = "'" + text;
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  function publicListCsv(snapshot) {
+    const columns = ["Titre", "Artiste", "Lien YouTube", "Type", "Proposé par", "Votes", "Durée (secondes)", "Ajouté le", "Catégories", "Collecte récupérée le"];
+    return "\uFEFF" + [columns.map(csvCell).join(";"), ...snapshot.rows.map((row) => [row.title, row.artist, row.url, row.type, row.author, row.votes, row.duration, row.created_at, row.categories, snapshot.loaded_at].map(csvCell).join(";"))].join("\r\n") + "\r\n";
+  }
+  function publicListTxt(snapshot) { const links = Array.from(new Set(snapshot.rows.map((row) => row.url).filter(Boolean))); return { text: links.join("\r\n") + (links.length ? "\r\n" : ""), count: links.length }; }
+  function downloadPublicList(text, format, snapshot, cached) {
+    const blob = new Blob([text], { type: format === "csv" ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob), link = el("a"), date = snapshot.loaded_at.replace(/[:.]/g, "-");
+    link.href = url; link.download = `playlist-fanny-${format === "csv" ? "liste" : "liens"}-${date}${cached ? "-copie" : ""}.${format}`;
+    link.className = "hidden"; document.body.append(link); link.click(); link.remove();
+    // Leave time for browsers and mobile save sheets to consume a large Blob.
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+  async function savePublicList(format) {
+    if (state.exportPending) return;
+    const serial = ++state.exportSerial; state.exportPending = true; state.exportController = new AbortController();
+    $("#public-export-csv").disabled = $("#public-export-txt").disabled = true;
+    message($("#public-export-feedback"), "Récupération de toute la collecte…");
+    let snapshot, cached = false;
+    try {
+      try {
+        if (navigator.onLine === false) throw new Error("La connexion est coupée.");
+        const result = await api("/api/proposals?sort=popular", { signal: state.exportController.signal });
+        if (serial !== state.exportSerial) return;
+        if (!Array.isArray(result.items)) throw new Error("La liste complète n’a pas été reçue.");
+        snapshot = { rows: publicListRows(result.items, result.categories || []), loaded_at: new Date().toISOString() };
+        state.exportCache = snapshot;
+      } catch (error) {
+        if (error.name === "AbortError" || serial !== state.exportSerial) return;
+        snapshot = cachedPublicList(); cached = true;
+        if (!snapshot) throw new Error("La collecte est inaccessible et aucune liste n’a encore été chargée sur cette page. Réessayez lorsque la connexion revient.");
+      }
+      if (serial !== state.exportSerial || !$("#public-export-dialog").open) return;
+      const links = format === "txt" ? publicListTxt(snapshot) : null;
+      downloadPublicList(links ? links.text : publicListCsv(snapshot), format, snapshot, cached);
+      const count = links ? `${links.count.toLocaleString("fr")} lien${links.count > 1 ? "s" : ""} unique${links.count > 1 ? "s" : ""}` : `${snapshot.rows.length.toLocaleString("fr")} proposition${snapshot.rows.length > 1 ? "s" : ""}`;
+      message($("#public-export-feedback"), cached ? `Connexion indisponible : ${count} enregistrés depuis la copie récupérée le ${publicSnapshotDate(snapshot.loaded_at)}. Les changements suivants peuvent manquer.` : `${count} enregistrés. Collecte récupérée le ${publicSnapshotDate(snapshot.loaded_at)}.`, cached ? "warning" : "success");
+    } catch (error) { if (serial === state.exportSerial) message($("#public-export-feedback"), error.message, "error"); }
+    finally { if (serial === state.exportSerial) { state.exportPending = false; $("#public-export-csv").disabled = $("#public-export-txt").disabled = false; } }
+  }
+  const categoryIds = (item) => Array.from(new Set((Array.isArray(item?.category_ids) ? item.category_ids : []).filter((id) => typeof id === "string" && /^[0-9a-f]{32}$/i.test(id))));
+  function sortedCategories() { return state.categorySorted; }
+  function setCategories(records) {
+    state.categories = (Array.isArray(records) ? records : []).filter((item) => typeof item.id === "string" && /^[0-9a-f]{32}$/i.test(item.id) && typeof item.name === "string");
+    state.categorySorted = state.categories.slice().sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || a.name.localeCompare(b.name, "fr"));
+    const referenced = new Set(state.items.flatMap(categoryIds)), visible = sortedCategories().filter((item) => item.active !== false || referenced.has(item.id));
+    if (state.categoryFilter && state.categoryFilter !== "uncategorized" && !visible.some((item) => item.id === state.categoryFilter)) state.categoryFilter = "";
+    const options = [["", "Tous les moments"], ["uncategorized", "Sans catégorie"], ...visible.map((item) => [item.id, `${item.name}${item.active === false ? " (archivé)" : ""}`])].map(([value, text]) => { const option = el("option", "", text); option.value = value; return option; });
+    reconcile($("#category-filter"), options); $("#category-filter").value = state.categoryFilter;
+  }
+  function categoryTags(item) {
+    const tags = el("div", "category-tags"), ids = new Set(categoryIds(item));
+    sortedCategories().filter((category) => ids.has(category.id)).forEach((category) => { const tag = el("span", `category-tag${category.active === false ? " archived-category" : ""}`, category.name); if (category.active === false) tag.title = "Moment archivé : le choix déjà fait reste conservé."; tags.append(tag); });
+    return tags;
+  }
+  function renderOrganizerAccess() {
+    const enabled = !!cloud(); $("#organizer-access").classList.toggle("hidden", !enabled);
+    $("#organizer-login-panel").classList.toggle("hidden", !!state.organizer);
+    $("#organizer-signed-panel").classList.toggle("hidden", !state.organizer);
+    $("#category-manager").classList.toggle("hidden", !enabled || !state.organizer);
+    $("#organizer-account").textContent = state.organizer?.email || "";
+    const signup = state.organizerMode === "signup";
+    $("#organizer-auth-submit").textContent = state.organizerPending ? "Vérification…" : signup ? "Créer mon accès" : "Se connecter";
+    $("#organizer-auth-mode").textContent = signup ? "J’ai déjà un accès" : "Créer mon accès";
+    $("#organizer-auth-help").textContent = signup ? "Choisissez au moins 12 caractères. Confirmez ensuite votre adresse avec le mail de Supabase, puis connectez-vous. Une inscription ne donne pas automatiquement les droits d’organisation." : "L’accès à l’organisation est réservé au compte autorisé pour cet événement.";
+    $("#organizer-password").minLength = signup ? 12 : 1; $("#organizer-password").autocomplete = signup ? "new-password" : "current-password";
+    ["#organizer-email", "#organizer-password", "#organizer-auth-submit", "#organizer-auth-mode", "#organizer-logout"].forEach((selector) => $(selector).disabled = state.organizerPending);
+  }
+  async function loadOrganizerSession() {
+    if (!cloud()) { state.organizer = null; renderOrganizerAccess(); return; }
+    try { const result = await api("/api/organizer/session"); state.organizer = result.authenticated === true && result.organizer ? result.organizer : null; }
+    catch { state.organizer = null; }
+    renderOrganizerAccess(); keepViewport(() => renderProposals({ preserveOrder: true }));
+  }
+  function resetCategoryForm() {
+    state.managerEditing = null; $("#category-form").reset();
+    $("#category-order").value = Math.min(2147483647, Math.max(-1, ...state.categories.map((item) => Number(item.sort_order || 0))) + 1);
+    $("#category-submit").textContent = "Créer ce moment"; $("#category-cancel-edit").classList.add("hidden");
+  }
+  function editCategory(category) {
+    state.managerEditing = category.id; $("#category-name").value = category.name; $("#category-order").value = category.sort_order || 0; $("#category-active").checked = category.active !== false;
+    $("#category-submit").textContent = "Enregistrer le moment"; $("#category-cancel-edit").classList.remove("hidden"); $("#category-name").focus();
+  }
+  function renderCategoryManager() {
+    const target = $("#category-manager-list"); target.replaceChildren();
+    sortedCategories().forEach((category) => {
+      const row = el("article", "category-manager-row"), text = el("div"); text.append(el("strong", "", category.name), el("p", "muted", `${category.active === false ? "Archivé · choix existants conservés" : "Proposé aux invités"} · ordre ${category.sort_order || 0}`));
+      const actions = el("div", "button-row"), edit = el("button", "button subtle small", "Modifier"), archive = el("button", "button subtle small", category.active === false ? "Réactiver" : "Archiver");
+      edit.type = archive.type = "button"; edit.dataset.editCategory = category.id; archive.dataset.archiveCategory = category.id;
+      edit.addEventListener("click", () => editCategory(category)); archive.addEventListener("click", () => changeCategoryActivity(category)); actions.append(edit, archive); row.append(text, actions); target.append(row);
+    });
+    if (!state.categories.length) target.append(el("p", "muted", "Vous n’avez pas encore créé de moment. Commencez par le nom de votre choix ou regardez les suggestions."));
+  }
+  async function loadCategoryManager() {
+    if (!state.organizer) return;
+    const result = await api("/api/categories"); setCategories(result.categories || []); renderCategoryManager();
+    if (!state.managerEditing) resetCategoryForm();
+    keepViewport(() => renderProposals({ preserveOrder: true }));
+  }
+  async function categoryMutation(path, body, method, clearForm = false) {
+    if (!state.organizer || state.managerPending) return;
+    state.managerPending = true; $("#category-manager").querySelectorAll("button,input").forEach((node) => { node.disabled = true; }); feedbackCategoryManager("Enregistrement du moment…");
+    try {
+      await api(path, { method, body }); if (clearForm) resetCategoryForm(); await loadProposals({ background: true }); await loadCategoryManager();
+      feedbackCategoryManager("Les moments de la soirée sont enregistrés. Les invités peuvent utiliser les catégories actives.", "success");
+    } catch (error) { feedbackCategoryManager(error.message, "error"); }
+    finally { state.managerPending = false; $("#category-manager").querySelectorAll("button,input").forEach((node) => { node.disabled = false; }); }
+  }
+  function feedbackCategoryManager(text, type = "info") { message($("#category-manager-feedback"), text, type); }
+  function changeCategoryActivity(category) { return categoryMutation(`/api/categories/${encodeURIComponent(category.id)}`, { active: category.active === false }, "PATCH"); }
+  function openCategoryAssignment(item) {
+    if (item.mine !== true && !state.organizer) return;
+    state.categoryEditing = item; state.categoryAssignmentPending = false;
+    $("#category-assignment-title").textContent = item.title || "Ce morceau";
+    const selected = new Set(categoryIds(item)), target = $("#category-assignment-options"); target.replaceChildren();
+    sortedCategories().filter((category) => category.active !== false || selected.has(category.id)).forEach((category) => {
+      const label = el("label", "category-assignment-option"), check = el("input"); check.type = "checkbox"; check.value = category.id; check.checked = selected.has(category.id); check.dataset.categoryId = category.id;
+      label.append(check, el("span", "", `${category.name}${category.active === false ? " (archivé, vous pouvez le retirer)" : ""}`)); target.append(label);
+    });
+    if (!target.children.length) target.append(el("p", "muted", "L’organisation n’a pas encore créé de moment. Votre morceau peut rester sans catégorie en attendant."));
+    message($("#category-assignment-feedback"), ""); $("#category-assignment-save").disabled = $("#category-assignment-cancel").disabled = false;
+    $("#category-assignment-dialog .modal-close").disabled = false; $("#category-assignment-dialog").showModal();
+  }
+  async function saveCategoryAssignment(event) {
+    event.preventDefault(); if (!state.categoryEditing || state.categoryAssignmentPending) return;
+    const item = state.categoryEditing, visibleIds = new Set(Array.from($("#category-assignment-options").querySelectorAll("input"), (check) => check.value));
+    const ids = [...categoryIds(item).filter((id) => !visibleIds.has(id)), ...Array.from($("#category-assignment-options").querySelectorAll("input:checked"), (check) => check.value)];
+    state.categoryAssignmentPending = true; $("#category-assignment-save").disabled = $("#category-assignment-cancel").disabled = $("#category-assignment-dialog .modal-close").disabled = true;
+    message($("#category-assignment-feedback"), "Enregistrement des moments…");
+    try {
+      const result = await api(`/api/proposals/${item.id}/categories`, { method: "PATCH", body: { category_ids: ids } });
+      if (!result.item) throw new Error("Les moments n’ont pas pu être actualisés. Réessayez.");
+      Object.assign(item, result.item); keepViewport(() => renderProposals({ preserveOrder: true })); $("#category-assignment-dialog").close(); toast("Les moments de ce morceau sont enregistrés.");
+    } catch (error) { message($("#category-assignment-feedback"), error.message, "error"); }
+    finally { state.categoryAssignmentPending = false; $("#category-assignment-save").disabled = $("#category-assignment-cancel").disabled = $("#category-assignment-dialog .modal-close").disabled = false; }
   }
   function duration(seconds) { if (!Number.isFinite(Number(seconds)) || seconds == null || Number(seconds) <= 0) return "Durée à compléter"; const n = Math.max(0, Math.floor(Number(seconds))), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), remainder = String(n % 60).padStart(2, "0"); return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`; }
   function playlistDuration() {
@@ -348,13 +513,14 @@
   }
   function filteredProposals() {
     const query = state.query.trim().toLocaleLowerCase("fr");
-    return state.catalogueItems.filter((item) => (!state.mine || item.mine === true) && [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)))
+    return state.catalogueItems.filter((item) => (!state.mine || item.mine === true) && (!state.categoryFilter || (state.categoryFilter === "uncategorized" ? !categoryIds(item).length : categoryIds(item).includes(state.categoryFilter))) && [item.title, item.artist, item.nickname, item.channel].some((value) => (value || "").toLocaleLowerCase("fr").includes(query)))
       .sort(state.sort === "popular" ? (a, b) => Number(b.votes || 0) - Number(a.votes || 0) || Number(b.id) - Number(a.id) : (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
   }
   function locateProposal(item) {
     if ($("#manual-match-dialog").open) $("#manual-match-dialog").close();
     applyCatalogueUpdates(false);
     state.mine = false; state.query = ""; $("#catalogue-query").value = "";
+    state.categoryFilter = ""; $("#category-filter").value = "";
     const index = filteredProposals().findIndex((candidate) => candidate.id === item.id);
     if (index < 0) { toast("Cette proposition n’est plus dans la playlist. Actualisez pour vérifier."); return; }
     state.page = Math.floor(index / PAGE_SIZE) + 1; renderProposals();
@@ -603,7 +769,7 @@
     items.slice(first, first + PAGE_SIZE).forEach((item, localIndex) => {
       const index = first + localIndex;
       const card = el("article", "track-card"); card.dataset.proposalId = String(item.id); card.tabIndex = -1;
-      card.dataset.renderSignature = JSON.stringify([index, item.title, item.artist, item.channel, item.duration, item.source_kind, item.url, item.state, item.nickname, item.avatar_id, item.avatar_version, item.votes, item.voted, item.mine, state.session?.settings?.offline_mode, state.session?.settings?.votes_open]);
+      card.dataset.renderSignature = JSON.stringify([index, item.title, item.artist, item.channel, item.duration, item.source_kind, item.url, item.state, item.nickname, item.avatar_id, item.avatar_version, item.votes, item.voted, item.mine, categoryIds(item), sortedCategories().filter((category) => categoryIds(item).includes(category.id)).map((category) => [category.name, category.active]), !!state.organizer, state.session?.settings?.offline_mode, state.session?.settings?.votes_open]);
       const visual = el("div", `track-art track-art-${index % 4}`); const image = el("img"); image.src = "./static/placeholder.svg"; image.alt = ""; image.loading = "lazy"; visual.append(image, el("span", "track-number", String(index + 1).padStart(2, "0")));
       const content = el("div", "track-content"); content.append(el("h3", "track-title", item.title || "Titre à retrouver"));
       content.append(el("p", "track-artist", item.artist || (item.channel ? `Chaîne : ${item.channel}` : "Artiste à préciser")));
@@ -613,6 +779,7 @@
       else if (item.state === "approved") details.append(el("span", "mini-tag approved", "Validé"));
       content.append(details);
       if (item.source_kind !== "playlist") content.append(versionTags(item.title));
+      content.append(categoryTags(item));
       if (item.source_kind === "playlist" && /^https:\/\/www\.youtube\.com\/playlist\?list=[A-Za-z0-9_-]{2,200}$/.test(item.url || "")) { const source = el("a", "result-source", "Voir la playlist sur YouTube →"); source.href = item.url; source.target = "_blank"; source.rel = "noopener noreferrer"; const actions = el("div", "track-source-actions"); actions.append(source); content.append(actions); }
       const preview = previewButton(item);
       if (preview) {
@@ -623,6 +790,9 @@
       const bottom = el("div", "track-bottom"); const author = el("span", "track-author"), avatar = el("span", "tiny-avatar"); setAvatar(avatar, item); author.append(avatar, document.createTextNode(item.nickname || "Organisation"));
       const button = el("button", `vote-button${item.voted ? " voted" : ""}`); button.type = "button"; button.setAttribute("aria-label", `${item.voted ? "Retirer mon vote pour" : "Voter pour"} ${item.title}`); button.setAttribute("aria-pressed", String(!!item.voted)); button.append(el("span", "heart", item.voted ? "♥" : "♡"), el("span", "", String(item.votes || 0))); button.disabled = state.session?.settings?.votes_open === false; button.addEventListener("click", () => voteFor(item, button)); bottom.append(author, button);
       card.append(visual, content, bottom);
+      if (item.mine === true || state.organizer) {
+        const moments = el("div", "track-moment-actions"), choose = el("button", "button subtle small", "Choisir les moments"); choose.type = "button"; choose.dataset.categoryProposalId = String(item.id); choose.addEventListener("click", () => openCategoryAssignment(item)); moments.append(choose); card.append(moments);
+      }
       if (item.mine === true) {
         const ownActions = el("div", "track-own-actions");
         const withdraw = el("button", "withdraw-button", "Retirer ma proposition"); withdraw.type = "button"; withdraw.dataset.withdrawId = String(item.id); withdraw.setAttribute("aria-label", `Retirer ma proposition : ${item.title}`); withdraw.addEventListener("click", () => requestWithdrawal(item)); ownActions.append(withdraw); card.append(ownActions);
@@ -648,6 +818,8 @@
     if (serial !== state.catalogueSerial) return;
     const previous = new Map(state.items.map((item) => [item.id, item])), displayed = new Set(state.catalogueItems.map((item) => item.id));
     state.items = (data.items || []).map((item) => { const old = previous.get(item.id); if (!old) return item; Object.assign(old, item); return old; });
+    setCategories(data.categories || []);
+    state.itemsLoadedAt = new Date().toISOString();
     if (background) { state.catalogueItems = state.items.filter((item) => displayed.has(item.id)); state.pendingNewCount = state.items.length - state.catalogueItems.length; }
     else applyCatalogueUpdates(false);
     rebuildMatches();
@@ -675,7 +847,54 @@
   $("#withdraw-cancel").addEventListener("click", () => { if (!state.withdrawalPending) $("#withdraw-dialog").close(); });
   $("#withdraw-dialog").addEventListener("cancel", (event) => { if (state.withdrawalPending) event.preventDefault(); });
   $("#withdraw-dialog").addEventListener("close", () => { if (!state.withdrawalPending) state.withdrawing = null; });
-  $("#organisation-button").addEventListener("click", () => $("#organisation-dialog").showModal());
+  $("#organisation-button").addEventListener("click", async () => {
+    renderOrganizerAccess(); $("#organisation-dialog").showModal(); await loadOrganizerSession();
+    if (state.organizer) { try { await loadCategoryManager(); } catch (error) { feedbackCategoryManager(error.message, "error"); } }
+  });
+  $("#organisation-dialog").addEventListener("close", () => { $("#organizer-password").value = ""; });
+  $("#organizer-auth-mode").addEventListener("click", () => { state.organizerMode = state.organizerMode === "login" ? "signup" : "login"; $("#organizer-password").value = ""; message($("#organizer-auth-feedback"), ""); renderOrganizerAccess(); });
+  $("#organizer-auth-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); if (state.organizerPending || !cloud()) return;
+    const mode = state.organizerMode; state.organizerPending = true; renderOrganizerAccess(); message($("#organizer-auth-feedback"), mode === "signup" ? "Création de votre accès et demande de confirmation…" : "Vérification de votre accès organisation…");
+    try {
+      const result = await api(`/api/organizer/${mode}`, { method: "POST", body: { email: $("#organizer-email").value.trim(), password: $("#organizer-password").value } });
+      if (mode === "signup") { state.organizerMode = "login"; message($("#organizer-auth-feedback"), result.message || "Confirmez votre adresse avec le mail de Supabase, puis connectez-vous. Si le mail n’arrive pas, consultez l’aide ci-dessous.", "info"); }
+      else {
+        if (result.authenticated !== true || !result.organizer) throw new Error("Ce compte n’est pas autorisé à organiser cet événement.");
+        state.organizer = result.organizer; message($("#organizer-auth-feedback"), "Vous pouvez gérer les moments de la soirée et classer tous les morceaux.", "success");
+        await loadCategoryManager();
+      }
+    } catch (error) { message($("#organizer-auth-feedback"), `${error.message}${mode === "signup" ? " Si l’envoi du mail est refusé, consultez « Le mail de confirmation n’arrive pas ? »." : ""}`, "error"); }
+    finally { $("#organizer-password").value = ""; state.organizerPending = false; renderOrganizerAccess(); keepViewport(() => renderProposals({ preserveOrder: true })); }
+  });
+  $("#organizer-logout").addEventListener("click", async () => {
+    if (state.organizerPending) return; state.organizerPending = true; renderOrganizerAccess();
+    try { await api("/api/organizer/logout", { method: "POST", body: {} }); state.organizer = null; $("#organizer-password").value = $("#organizer-email").value = ""; message($("#organizer-auth-feedback"), "Vous êtes déconnecté de l’organisation."); }
+    catch (error) { message($("#organizer-auth-feedback"), error.message, "error"); }
+    finally { state.organizerPending = false; renderOrganizerAccess(); keepViewport(() => renderProposals({ preserveOrder: true })); }
+  });
+  $("#category-form").addEventListener("submit", (event) => { event.preventDefault(); categoryMutation(state.managerEditing ? `/api/categories/${encodeURIComponent(state.managerEditing)}` : "/api/categories", { name: $("#category-name").value.trim(), sort_order: Number($("#category-order").value), active: $("#category-active").checked }, state.managerEditing ? "PATCH" : "POST", true); });
+  $("#category-cancel-edit").addEventListener("click", resetCategoryForm);
+  $("#category-show-suggestions").addEventListener("click", async () => {
+    if (!state.organizer) return; $("#category-show-suggestions").disabled = true;
+    try {
+      const result = await api("/api/categories/suggestions"), target = $("#category-suggestions"); target.replaceChildren();
+      (result.items || []).forEach((item) => { if (typeof item.name !== "string") return; const suggestion = el("button", "button subtle small", item.name); suggestion.type = "button"; suggestion.title = item.reason || "Remplir le formulaire avec cette suggestion, sans créer de catégorie."; suggestion.addEventListener("click", () => { resetCategoryForm(); $("#category-name").value = item.name.slice(0, 80); $("#category-name").focus(); feedbackCategoryManager("La suggestion remplit le formulaire. Cliquez sur « Créer ce moment » pour l’activer."); }); target.append(suggestion); });
+      if (!target.children.length) target.append(el("p", "muted", "Aucune suggestion supplémentaire. Vous pouvez choisir votre propre nom."));
+    } catch (error) { feedbackCategoryManager(error.message, "error"); }
+    finally { $("#category-show-suggestions").disabled = false; }
+  });
+  $("#category-assignment-form").addEventListener("submit", saveCategoryAssignment);
+  $("#category-assignment-cancel").addEventListener("click", () => { if (!state.categoryAssignmentPending) $("#category-assignment-dialog").close(); });
+  $("#category-assignment-dialog").addEventListener("cancel", (event) => { if (state.categoryAssignmentPending) event.preventDefault(); });
+  $("#save-public-list").addEventListener("click", () => {
+    const cached = cachedPublicList();
+    message($("#public-export-feedback"), cached ? `Dernière collecte chargée : ${cached.rows.length.toLocaleString("fr")} proposition(s), le ${publicSnapshotDate(cached.loaded_at)}. Le fichier sera actualisé avant l’enregistrement si la connexion est disponible.` : "La collecte sera chargée avant l’enregistrement du fichier.");
+    $("#public-export-dialog").showModal();
+  });
+  $("#public-export-csv").addEventListener("click", () => savePublicList("csv"));
+  $("#public-export-txt").addEventListener("click", () => savePublicList("txt"));
+  $("#public-export-dialog").addEventListener("close", () => { state.exportSerial++; state.exportController?.abort(); state.exportPending = false; $("#public-export-csv").disabled = $("#public-export-txt").disabled = false; });
   [["#proposal-choice-video", "video"], ["#proposal-choice-playlist", "playlist"]].forEach(([selector, mode]) => $(selector).addEventListener("click", () => { const resolve = state.proposalScopeResolve; state.proposalScopeResolve = null; resolve?.(mode); $("#proposal-scope-dialog").close(); }));
   $("#proposal-scope-dialog").addEventListener("close", () => { state.proposalScopeResolve?.(null); state.proposalScopeResolve = null; });
   $("#manual-match-confirm").addEventListener("click", () => { const resolve = state.manualMatchResolve; state.manualMatchResolve = null; resolve?.(true); $("#manual-match-dialog").close(); });
@@ -715,16 +934,18 @@
   $("#filter-mine").addEventListener("click", async () => { if (!await ensureIdentity()) return; state.mine = true; state.page = 1; renderProposals(); });
   $("#catalogue-query").addEventListener("input", (event) => { state.query = event.target.value; state.page = 1; renderProposals(); });
   $("#catalogue-sort").addEventListener("change", (event) => { state.sort = event.target.value; state.page = 1; renderProposals(); });
+  $("#category-filter").addEventListener("change", (event) => { state.categoryFilter = event.target.value; state.page = 1; renderProposals(); });
   [["#proposal-prev", -1], ["#proposal-next", 1]].forEach(([selector, direction]) => $(selector).addEventListener("click", () => { state.page += direction; renderProposals(); $("#propositions").scrollIntoView({ block: "start" }); }));
   $("#refresh-proposals").addEventListener("click", async (event) => { event.currentTarget.disabled = true; try { state.session = await api("/api/session"); syncSession(); await loadProposals(); toast("La playlist est à jour."); } catch (error) { toast(error.message); } finally { $("#refresh-proposals").disabled = false; } });
   $("#apply-catalogue-updates").addEventListener("click", () => {
     state.mine = false; state.query = ""; state.sort = "recent"; state.page = 1; $("#catalogue-query").value = ""; $("#catalogue-sort").value = "recent";
+    state.categoryFilter = ""; $("#category-filter").value = "";
     applyCatalogueUpdates(); const first = $("#proposal-list .track-card"); if (first) { first.focus({ preventScroll: true }); first.scrollIntoView({ block: "nearest" }); }
   });
   $("#share-button").addEventListener("click", () => { $("#share-url").value = state.session?.settings?.public_url || window.location.href.split("#")[0]; $("#share-qr").classList.toggle("hidden", !!cloud() || !state.session?.settings?.public_url); if (!cloud() && state.session?.settings?.public_url) $("#share-qr").src = "/api/qr?scope=public"; $("#share-dialog").showModal(); });
   $("#copy-share").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#share-url").value); message($("#share-feedback"), "Lien copié. À vous de le partager !", "success"); } catch { $("#share-url").select(); message($("#share-feedback"), "Sélectionnez et copiez le lien affiché avec votre navigateur."); } });
   async function boot() {
-    try { state.session = await api("/api/session"); syncSession(); await loadProposals(); }
+    try { state.session = await api("/api/session"); syncSession(); await loadProposals(); await loadOrganizerSession(); }
     catch (error) { $("#global-notice").textContent = error.message; $("#global-notice").classList.remove("hidden"); $("#catalogue-empty").classList.remove("hidden"); $("#catalogue-empty h3").textContent = "La playlist n’a pas pu être chargée."; $("#catalogue-empty p").textContent = "Utilisez Actualiser lorsque la connexion revient."; }
   }
   restoreDrafts();

@@ -498,3 +498,44 @@ def test_real_audio_upload_rename_pack_download_and_guest_cannot_fetch(cfg):
     assert TestClient(create_guest_app(cfg)).get(exported['download_url']).status_code==404
     assert client.get('/api/catalogue?format=csv').status_code==200
     assert client.get('/api/catalogue?format=json').status_code==200
+
+
+@pytest.mark.parametrize('route',['library','proposal','import'])
+def test_admin_audio_change_failed_commit_preserves_original_files_and_rows(cfg,monkeypatch,route):
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'): pytest.skip('FFmpeg required')
+    original=cfg.temp_dir/'commit-test.wav'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=1','-y',str(original)],check=True)
+    client,headers=admin(cfg)
+    uploaded=client.post('/api/library/import',files={'file':('original.wav',original.read_bytes(),'audio/wav')},data={'title':'Original title'},headers=headers)
+    assert uploaded.status_code==200,uploaded.text
+    source_id=uploaded.json()['item']['id']
+    real_connect=db.connect
+    with real_connect(cfg) as conn:
+        proposal_id=conn.execute('INSERT INTO proposals(source_id,created_at) VALUES(?,?)',(source_id,db.now())).lastrowid
+        before_source=dict(conn.execute('SELECT * FROM sources WHERE id=?',(source_id,)).fetchone())
+        before_proposal=dict(conn.execute('SELECT * FROM proposals WHERE id=?',(proposal_id,)).fetchone())
+    before_files={path.name:path.read_bytes() for path in cfg.audio_dir.iterdir() if path.is_file()}
+    class FailedCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError('simulated commit failure')
+    def failing_connect(config):
+        conn=sqlite3.connect(config.db_path,factory=FailedCommit)
+        conn.row_factory=sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        return conn
+    app=create_admin_app(cfg)
+    failing_client=TestClient(app,raise_server_exceptions=False)
+    failing_client.cookies.update(client.cookies)
+    monkeypatch.setattr(db,'connect',failing_connect)
+    if route=='import':
+        response=failing_client.post('/api/library/import',files={'file':('new.wav',original.read_bytes(),'audio/wav')},data={'title':'New import'},headers=headers)
+    else:
+        endpoint=f'/api/library/{source_id}' if route=='library' else f'/api/proposals/{proposal_id}'
+        response=failing_client.patch(endpoint,json={'title':'New title','artist':'New artist'},headers=headers)
+    assert response.status_code==500
+    with real_connect(cfg) as conn:
+        assert dict(conn.execute('SELECT * FROM sources WHERE id=?',(source_id,)).fetchone())==before_source
+        assert dict(conn.execute('SELECT * FROM proposals WHERE id=?',(proposal_id,)).fetchone())==before_proposal
+        assert conn.execute('SELECT COUNT(*) FROM sources').fetchone()[0]==1
+    assert {path.name:path.read_bytes() for path in cfg.audio_dir.iterdir() if path.is_file()}==before_files
+    assert original.is_file()

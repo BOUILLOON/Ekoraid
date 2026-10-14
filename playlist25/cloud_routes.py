@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import Response
 from . import db
 from .security import require_admin, require_csrf, rate_limit
+from .private_config import cloud_settings_snapshot
 
 _lock=threading.Lock()
 
@@ -29,12 +30,13 @@ def add_cloud_routes(app,cfg):
     @app.get('/api/cloud/status')
     def status(request:Request):
         require_admin(request,cfg)
+        connection=cloud_settings_snapshot(cfg)
         with closing(db.connect(cfg)) as conn:
-            return {'configured':bool(cfg.supabase_url and cfg.supabase_service_role_key),
-                    'url':cfg.supabase_url,'secret_present':bool(cfg.supabase_service_role_key),
+            return {'configured':bool(connection.supabase_url and connection.supabase_service_role_key),
+                    'url':connection.supabase_url,'secret_present':bool(connection.supabase_service_role_key),
                     'last_sync':db.get_setting(conn,'cloud_last_sync',None),
                     'offline':db.get_setting(conn,'offline_mode',False),
-                    'message':'Renseignez SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY dans .env.local sur votre PC, puis redémarrez.' if not(cfg.supabase_url and cfg.supabase_service_role_key) else 'La collecte publique fonctionne indépendamment de votre PC.'}
+                    'message':'Configurez la connexion privée dans ce panneau, puis récupérez les propositions sans arrêter le studio.' if not(connection.supabase_url and connection.supabase_service_role_key) else 'La collecte publique fonctionne indépendamment de votre PC.'}
 
     def operation(request,kind):
         require_admin(request,cfg); require_csrf(request)
@@ -43,12 +45,13 @@ def add_cloud_routes(app,cfg):
             raise HTTPException(409,'Une synchronisation est déjà en cours.')
         try:
             from . import cloud_sync
+            connection=cloud_settings_snapshot(cfg)
             with closing(db.connect(cfg)) as conn:
                 with conn:
                     if db.get_setting(conn,'offline_mode',False):
                         raise HTTPException(503,'Désactivez le mode hors ligne pour communiquer avec le site public.')
-                    if kind=='pull': return cloud_sync.pull(cfg,conn)
-                    return cloud_sync.push(cfg,conn)
+                    if kind=='pull': return cloud_sync.pull(connection,conn)
+                    return cloud_sync.push(connection,conn)
         except cloud_sync.CloudSyncError as error:
             raise HTTPException(503,str(error)) from None
         finally: _lock.release()

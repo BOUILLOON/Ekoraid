@@ -1,6 +1,9 @@
 """Persistent job queue, with an atomic claim and a separately locked worker."""
 from __future__ import annotations
 
+import hashlib
+import json
+
 from .db import get_setting, now
 from .library import LibraryError, resolve_audio_path, verify_audio
 from .providers import SourceError, parse_youtube_url
@@ -33,6 +36,31 @@ def _existing_valid(source, cfg) -> bool:
         return False
 
 
+def _publication_matches(source, job, cfg) -> bool:
+    """A pending publication may only recover the exact file this job verified."""
+    if job is None or job["status"] == "available":
+        return True
+    checkpoint = cfg.temp_dir / f"job-{job['id']}" / "publication.json"
+    if not checkpoint.exists():
+        return True  # Previous versions had no publication checkpoint.
+    try:
+        if checkpoint.is_symlink() or not checkpoint.resolve().is_relative_to(cfg.temp_dir.resolve()) or checkpoint.stat().st_size > 4096:
+            return False
+        expected = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if not isinstance(expected, dict) or expected.get("job_id") != job["id"] or expected.get("source_id") != source["id"] or expected.get("filename") != source["file_path"]:
+            return False
+        path = resolve_audio_path(cfg, source["file_path"])
+        if path.stat().st_size != expected.get("size"):
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as audio:
+            for block in iter(lambda: audio.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest() == expected.get("sha256")
+    except (LibraryError, OSError, ValueError, TypeError):
+        return False
+
+
 def enqueue_sources(conn, cfg, ids, retry: bool = False) -> dict:
     """Reserve each source once. Caller commits; available files never download again."""
     capacity = int(cfg.max_queue_size)
@@ -50,9 +78,11 @@ def enqueue_sources(conn, cfg, ids, retry: bool = False) -> dict:
         reason = ""
         if source is None:
             reason = "Morceau introuvable."
-        elif _existing_valid(source, cfg):
+        elif _existing_valid(source, cfg) and _publication_matches(source, job, cfg):
             conn.execute("UPDATE sources SET status='available' WHERE id=?", (source_id,))
             if job and job["status"] not in ACTIVE_STATES:
+                if job["status"] == "queued":
+                    count -= 1
                 set_job_state(conn, job["id"], "available", progress=100, message="Fichier déjà présent et vérifié ; aucun nouveau téléchargement.")
             reason = "Fichier déjà disponible et vérifié."
         elif not source["url"]:
@@ -114,7 +144,7 @@ def recover_jobs(conn, cfg) -> dict:
     recovered, interrupted = [], []
     for source in conn.execute("SELECT * FROM sources WHERE status='available' OR file_path IS NOT NULL OR id IN (SELECT source_id FROM jobs WHERE status IN ('downloading','converting','verifying','interrupted'))").fetchall():
         job = conn.execute("SELECT * FROM jobs WHERE source_id=?", (source["id"],)).fetchone()
-        if _existing_valid(source, cfg):
+        if _existing_valid(source, cfg) and _publication_matches(source, job, cfg):
             conn.execute("UPDATE sources SET status='available' WHERE id=?", (source["id"],))
             if job and job["status"] != "available":
                 set_job_state(conn, job["id"], "available", progress=100, message="Fichier existant vérifié après redémarrage.")

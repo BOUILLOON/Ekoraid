@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import errno
 import json
 import math
@@ -10,9 +12,11 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import unicodedata
+import uuid
 
 from .db import now, source_dict
 
@@ -22,6 +26,79 @@ class LibraryError(ValueError):
 
 
 AUDIO_EXTENSIONS = frozenset({"mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "aif", "aiff", "wma", "webm", "mp4"})
+_FILE_TRANSACTIONS = ContextVar("library_file_transactions", default={})
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _file_signature(path: Path):
+    info = path.lstat()
+    if _is_link(path) or not stat.S_ISREG(info.st_mode):
+        raise LibraryError("Le fichier audio doit être un fichier direct.")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _discard_owned(path: Path, signature) -> None:
+    """Best-effort cleanup must never remove a replacement or mask a commit."""
+    try:
+        if _file_signature(path) == signature:
+            path.unlink()
+    except (OSError, LibraryError):
+        pass
+
+
+def _discard_unreferenced(conn, files) -> None:
+    """A failed commit can have an uncertain outcome: retain referenced files."""
+    for path, signature, relative in files:
+        try:
+            if conn.execute("SELECT 1 FROM sources WHERE file_path=? LIMIT 1", (relative,)).fetchone():
+                continue
+        except sqlite3.Error:
+            continue  # Preserve data when the database cannot confirm removal.
+        _discard_owned(path, signature)
+
+
+@contextmanager
+def file_transaction(conn: sqlite3.Connection):
+    """Own a DB commit and defer file removal until its outcome is known.
+
+    Callers must perform their related SQL inside this scope without committing
+    themselves. On rollback, old files stay intact and only our new files leave.
+    """
+    current = _FILE_TRANSACTIONS.get()
+    if id(conn) in current:
+        yield
+        return
+    changes = {"installed": [], "obsolete": []}
+    token = _FILE_TRANSACTIONS.set({**current, id(conn): changes})
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            finally:
+                _discard_unreferenced(conn, reversed(changes["installed"]))
+            raise
+        _discard_unreferenced(conn, changes["obsolete"])
+    finally:
+        _FILE_TRANSACTIONS.reset(token)
+
+
+def _record_files(conn, installed, obsolete=(), *, outer_transaction=False):
+    changes = _FILE_TRANSACTIONS.get().get(id(conn))
+    if changes is not None:
+        changes["installed"].extend(installed)
+        changes["obsolete"].extend(obsolete)
+    elif not outer_transaction:
+        _discard_unreferenced(conn, obsolete)
+    # An unwrapped external transaction may still roll back. Preserve its old
+    # files in that case rather than guessing whether its caller will commit.
 
 
 def _plain_text(value: str, limit: int = 240) -> str:
@@ -54,7 +131,10 @@ def _confined(base: Path, value: str | Path) -> Path:
         raise LibraryError("Le chemin doit rester dans la bibliothèque audio.")
     try:
         resolved_base = Path(base).resolve()
-        candidate = (resolved_base / relative).resolve()
+        unresolved = resolved_base / relative
+        if any(_is_link(part) for part in (unresolved, *unresolved.parents) if part.is_relative_to(resolved_base)):
+            raise LibraryError("Le chemin audio ne doit pas utiliser de lien symbolique ni de jonction.")
+        candidate = unresolved.resolve()
     except (OSError, RuntimeError) as exc:
         raise LibraryError("Le chemin audio ne peut pas être résolu.") from exc
     if not candidate.is_relative_to(resolved_base) or candidate == resolved_base:
@@ -144,22 +224,66 @@ def _space_required(directory: Path, required: int, cfg) -> None:
         raise LibraryError("Espace disque insuffisant ; libérez de l'espace avant de réessayer.")
 
 
+def _copy_file(source: Path, destination: Path, expected=None) -> int:
+    """Stream one stable regular file; reject replacement during its copy."""
+    before = _file_signature(source)
+    if expected is not None and before != expected:
+        raise LibraryError("Le fichier audio a changé ; actualisez puis réessayez.")
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as original:
+        opened = os.fstat(original.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != before:
+            raise LibraryError("Le fichier audio a changé pendant son ouverture.")
+        with destination.open("wb") as output:
+            shutil.copyfileobj(original, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        after = os.fstat(original.fileno())
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != before or _file_signature(source) != before:
+        raise LibraryError("Le fichier audio a changé pendant sa copie ; réessayez.")
+    if destination.stat().st_size != before[2]:
+        raise LibraryError("La copie du fichier audio est incomplète.")
+    return before[2]
+
+
 def _install_file(staged: Path, destination: Path) -> None:
-    """Install atomically, including when temp and audio use different volumes."""
+    """Publish atomically without overwriting any existing audio file."""
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    reserved = os.fstat(descriptor)
+    os.close(descriptor)
+    signature = reserved.st_dev, reserved.st_ino, reserved.st_size, reserved.st_mtime_ns
+    temporary = None
+    published = False
     try:
-        os.replace(staged, destination)
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-        fd, temporary = tempfile.mkstemp(prefix=".audio-", suffix=".part", dir=destination.parent)
-        os.close(fd)
-        temporary = Path(temporary)
+        if _file_signature(destination) != signature:
+            raise LibraryError("La destination audio a changé ; réessayez.")
         try:
-            shutil.copy2(staged, temporary)
+            os.replace(staged, destination)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            fd, name = tempfile.mkstemp(prefix=".audio-", suffix=".part", dir=destination.parent)
+            os.close(fd)
+            temporary = Path(name)
+            _copy_file(staged, temporary)
+            if _file_signature(destination) != signature:
+                raise LibraryError("La destination audio a changé ; réessayez.")
             os.replace(temporary, destination)
-            staged.unlink()
-        finally:
-            temporary.unlink(missing_ok=True)
+            # Publication succeeded. A locked temporary file may be retried by
+            # the owning job's cleanup without turning this into a failed import.
+            try:
+                staged.unlink()
+            except OSError:
+                pass
+        published = True
+    finally:
+        if not published:
+            _discard_owned(destination, signature)
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def import_audio(conn: sqlite3.Connection, cfg, temp_path: str | Path, title: str = "", artist: str = "") -> dict:
@@ -171,6 +295,7 @@ def import_audio(conn: sqlite3.Connection, cfg, temp_path: str | Path, title: st
         raise LibraryError("Fichier audio absent ou vide.")
     if original.stat().st_size > int(cfg.max_upload_mb) * 1024 * 1024:
         raise LibraryError("Le fichier dépasse la taille maximale d'import.")
+    original_signature = _file_signature(original)
     metadata = verify_audio(original, cfg)
     extension = original.suffix.lower().lstrip(".")
     if extension not in AUDIO_EXTENSIONS:
@@ -183,10 +308,13 @@ def import_audio(conn: sqlite3.Connection, cfg, temp_path: str | Path, title: st
     os.close(fd)
     staged = Path(name)
     destination = None
-    installed = False
-    conn.execute("SAVEPOINT library_import")
+    installed = None
+    savepoint = False
+    outer_transaction = conn.in_transaction
     try:
-        shutil.copy2(original, staged)
+        conn.execute("SAVEPOINT library_import")
+        savepoint = True
+        _copy_file(original, staged, original_signature)
         _write_tags(staged, title, artist)
         verified = verify_audio(staged, cfg, metadata["duration"])
         cursor = conn.execute("INSERT INTO sources (title,artist,duration,status,created_at) VALUES (?,?,?,?,?)",
@@ -197,62 +325,89 @@ def import_audio(conn: sqlite3.Connection, cfg, temp_path: str | Path, title: st
         if destination.exists():
             raise LibraryError("Un fichier existe déjà à cet emplacement.")
         _install_file(staged, destination)
-        installed = True
+        installed = _file_signature(destination)
         conn.execute("UPDATE sources SET file_path=? WHERE id=?", (filename, source_id))
         item = source_dict(conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone())
         conn.execute("RELEASE SAVEPOINT library_import")
+        savepoint = False
+        _record_files(conn, [(destination, installed, filename)], outer_transaction=outer_transaction)
         return item
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT library_import")
-        conn.execute("RELEASE SAVEPOINT library_import")
-        if installed and destination:
-            destination.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            if savepoint and conn.in_transaction:
+                conn.execute("ROLLBACK TO SAVEPOINT library_import")
+                conn.execute("RELEASE SAVEPOINT library_import")
+        finally:
+            if installed and destination:
+                _discard_unreferenced(conn, [(destination, installed, filename)])
         raise
     finally:
-        staged.unlink(missing_ok=True)
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def rename_audio(conn: sqlite3.Connection, cfg, source_id: int, title: str, artist: str) -> dict:
-    row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
-    if row is None or not row["file_path"]:
-        raise LibraryError("Ce morceau ne possède pas de fichier dans la bibliothèque.")
-    original = resolve_audio_path(cfg, row["file_path"])
-    verify_audio(original, cfg, row["duration"])
     title, artist = _plain_text(title), _plain_text(artist)
     if not title:
         raise LibraryError("Le titre est obligatoire.")
-    filename = safe_filename(source_id, title, original.suffix)
-    destination = resolve_audio_path(cfg, filename)
-    if destination != original and destination.exists():
-        raise LibraryError("Un fichier existe déjà avec ce nom.")
-    _space_required(Path(cfg.temp_dir), original.stat().st_size * 2 + 16384, cfg)
-    _space_required(Path(cfg.audio_dir), original.stat().st_size + 16384, cfg)
-    fd, name = tempfile.mkstemp(prefix="metadata-", suffix=original.suffix, dir=cfg.temp_dir)
-    os.close(fd)
-    staged = Path(name)
-    installed = False
-    conn.execute("SAVEPOINT library_rename")
+    original = destination = staged = None
+    installed = None
+    savepoint = False
+    outer_transaction = conn.in_transaction
     try:
-        shutil.copy2(original, staged)
+        conn.execute("SAVEPOINT library_rename")
+        savepoint = True
+        # Obtain SQLite's writer lock before reading the source. Another rename
+        # or a worker cannot publish a stale file_path over this operation.
+        conn.execute("UPDATE sources SET file_path=file_path WHERE id=?", (source_id,))
+        row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if row is None or not row["file_path"]:
+            raise LibraryError("Ce morceau ne possède pas de fichier dans la bibliothèque.")
+        original = resolve_audio_path(cfg, row["file_path"])
+        original_signature = _file_signature(original)
+        verify_audio(original, cfg, row["duration"])
+        filename = safe_filename(source_id, title, original.suffix)
+        destination = resolve_audio_path(cfg, filename)
+        if destination == original:
+            # Artist-only edits must also keep the original bytes until commit.
+            filename = safe_filename(source_id, f"révision {uuid.uuid4().hex[:12]} - {title}", original.suffix)
+            destination = resolve_audio_path(cfg, filename)
+        if destination.exists():
+            raise LibraryError("Un fichier existe déjà avec ce nom.")
+        _space_required(Path(cfg.temp_dir), original_signature[2] * 2 + 16384, cfg)
+        _space_required(Path(cfg.audio_dir), original_signature[2] + 16384, cfg)
+        fd, name = tempfile.mkstemp(prefix="metadata-", suffix=original.suffix, dir=cfg.temp_dir)
+        os.close(fd)
+        staged = Path(name)
+        _copy_file(original, staged, original_signature)
         _write_tags(staged, title, artist)
         verified = verify_audio(staged, cfg, row["duration"])
         conn.execute("UPDATE sources SET title=?,artist=?,duration=?,file_path=? WHERE id=?",
                      (title, artist, verified["duration"], filename, source_id))
         _install_file(staged, destination)
-        installed = True
-        if destination != original:
-            original.unlink()
+        installed = _file_signature(destination)
         item = source_dict(conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone())
         conn.execute("RELEASE SAVEPOINT library_rename")
+        savepoint = False
+        _record_files(conn, [(destination, installed, filename)], [(original, original_signature, row["file_path"])], outer_transaction=outer_transaction)
         return item
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT library_rename")
-        conn.execute("RELEASE SAVEPOINT library_rename")
-        if installed and destination != original and original.exists():
-            destination.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            if savepoint and conn.in_transaction:
+                conn.execute("ROLLBACK TO SAVEPOINT library_rename")
+                conn.execute("RELEASE SAVEPOINT library_rename")
+        finally:
+            if installed and destination:
+                _discard_unreferenced(conn, [(destination, installed, filename)])
         raise
     finally:
-        staged.unlink(missing_ok=True)
+        if staged is not None:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def available_sources(conn: sqlite3.Connection, cfg) -> list[dict]:

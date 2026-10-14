@@ -275,3 +275,81 @@ def test_existing_active_transfer_quota_is_bounded(cfg, monkeypatch):
             transfers.create_transfer(conn, cfg, export_id, HOST)
         transfers.revoke_transfer(conn, first["id"])
         assert transfers.create_transfer(conn, cfg, export_id, HOST)["id"]
+
+
+@pytest.mark.parametrize("header", ["bytes=0-9", "bytes=10-", "bytes=-12", "bytes=0-9999999"])
+def test_lan_zip_supports_exact_resume_ranges_without_loading_the_pack(cfg, header):
+    result, archive = share(cfg)
+    data = archive.read_bytes()
+    response = guest_client(cfg).get(urlsplit(result["url"]).path + "/download", headers={"Range": header})
+    assert response.status_code == 206
+    if header == "bytes=0-9":
+        start, end = 0, 9
+    elif header == "bytes=10-":
+        start, end = 10, len(data) - 1
+    elif header == "bytes=-12":
+        start, end = len(data) - 12, len(data) - 1
+    else:
+        start, end = 0, len(data) - 1
+    assert response.content == data[start:end + 1]
+    assert response.headers["content-range"] == f"bytes {start}-{end}/{len(data)}"
+    assert int(response.headers["content-length"]) == len(response.content)
+    assert response.headers["accept-ranges"] == "bytes"
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("header", ["bytes=9999999-", "bytes=10-2", "bytes=-0", "bytes=-", "bytes=0-1,5-7", "bytes=" + "9" * 300 + "-"])
+def test_invalid_zip_ranges_do_not_leak_data_or_file_handles(cfg, header, monkeypatch):
+    result, archive = share(cfg)
+    opened = []
+    actual = transfers._open_archive
+    def recording(*args):
+        path, file, metadata = actual(*args)
+        opened.append(file)
+        return path, file, metadata
+    monkeypatch.setattr(transfers, "_open_archive", recording)
+    response = guest_client(cfg).get(urlsplit(result["url"]).path + "/download", headers={"Range": header})
+    assert response.status_code == 416 and response.content == b""
+    assert response.headers["content-range"] == f"bytes */{archive.stat().st_size}"
+    assert all(file.closed for file in opened)
+
+
+def test_zip_head_and_if_range_use_the_same_authorized_immutable_file(cfg):
+    result, archive = share(cfg)
+    client = guest_client(cfg)
+    path = urlsplit(result["url"]).path + "/download"
+    head = client.head(path)
+    assert head.status_code == 200 and head.content == b""
+    assert int(head.headers["content-length"]) == archive.stat().st_size
+    for validator in (head.headers["etag"], head.headers["last-modified"]):
+        response = client.get(path, headers={"Range": "bytes=5-10", "If-Range": validator})
+        assert response.status_code == 206 and response.content == archive.read_bytes()[5:11]
+    for validator in ('"different-file"', "W/" + head.headers["etag"], "invalid date"):
+        response = client.get(path, headers={"Range": "bytes=5-10", "If-Range": validator})
+        assert response.status_code == 200 and response.content == archive.read_bytes()
+    response = client.get(path, headers={"Range": "items=1-2"})
+    assert response.status_code == 200 and response.content == archive.read_bytes()
+    with connect(cfg) as conn:
+        transfers.revoke_transfer(conn, result["id"])
+    assert client.head(path).status_code == 404
+    assert client.get(path, headers={"Range": "bytes=5-10", "If-Range": head.headers["etag"]}).status_code == 404
+
+
+def test_copy_changed_between_path_validation_and_open_is_rejected(cfg, monkeypatch):
+    result, archive = share(cfg)
+    original_open = transfers.os.open
+    def changed(path, *args, **kwargs):
+        if Path(path) == archive:
+            with archive.open("ab") as output:
+                output.write(b"changed before descriptor open")
+        return original_open(path, *args, **kwargs)
+    # _open_archive must bind validation to its descriptor, rather than serving
+    # a path whose contents were replaced between the two operations.
+    original_path = transfers._archive_path
+    def validate_then_change(*args):
+        path = original_path(*args)
+        monkeypatch.setattr(transfers.os, "open", changed)
+        return path
+    monkeypatch.setattr(transfers, "_archive_path", validate_then_change)
+    response = guest_client(cfg).get(urlsplit(result["url"]).path + "/download")
+    assert response.status_code == 404

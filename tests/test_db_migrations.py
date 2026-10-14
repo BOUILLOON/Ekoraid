@@ -47,7 +47,7 @@ def test_upgrade_preserves_history_and_allows_distinct_readd(tmp_path):
     with closing(db.connect(cfg)) as conn, conn:
         row = dict(conn.execute('SELECT * FROM proposals WHERE id=73').fetchone())
         assert row == dict(id=73, source_id=41, guest_id='owner', state='approved',
-                           sort_order=5, created_at='2026-10-01', withdrawn_at=None)
+                           sort_order=5, created_at='2026-10-01', withdrawn_at=None, category_ids='[]', categories_dirty=0)
         assert list(map(tuple, conn.execute('SELECT * FROM votes'))) == [(73, 'voter', '2026-10-02')]
         assert conn.execute('SELECT status FROM jobs WHERE id=89').fetchone()[0] == 'completed'
         assert conn.execute("SELECT local_id FROM cloud_map WHERE remote_id='project:123'").fetchone()[0] == '73'

@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Tag de livraison (studio-windows-v…)"
         required: true
-        default: studio-windows-v2026.10.11.3
+        default: studio-windows-v2026.10.14.1
         type: string
       publish_release:
         description: Publier le ZIP vérifié dans une release GitHub
@@ -42,10 +42,12 @@ jobs:
             requirements-desktop-build.txt
       - name: Installer les versions épinglées
         run: python -m pip install -r requirements.txt -r requirements-desktop-build.txt
+      - name: Préparer les outils vérifiés pour toute la suite de tests
+        run: python scripts/packaging/prepare_test_runtime.py
       - name: Vérifier les tests de distribution
         shell: pwsh
         run: |
-          python -m pytest tests/test_desktop_packaging.py tests/test_windows_scripts.py tests/test_windows_smoke_diagnostics.py tests/test_frozen_streams.py tests/test_backups.py tests/test_backup_cli.py tests/test_desktop.py tests/test_diagnostics.py -q --junitxml=build/windows/pytest.xml
+          python -m pytest -q --junitxml=build/windows/pytest.xml
           $PlaylistTestExitCode = $LASTEXITCODE
           python scripts/packaging/annotate_pytest.py build/windows/pytest.xml
           exit $PlaylistTestExitCode
@@ -88,7 +90,7 @@ jobs:
           $description = @'
           Application Windows 11 x64 autonome : extraire tout le ZIP puis ouvrir Studio-Fanny.exe. Python, Node.js et FFmpeg sont intégrés.
 
-          Recherche de la bonne vidéo dans l'éditeur des propositions, résultats supplémentaires sur demande, brouillons conservés sur l'appareil et repères de versions. La fenêtre permet de sauvegarder le studio privé puis de restaurer vers une nouvelle installation en conservant l'ancienne. Diagnostic-Studio.cmd ouvre un rapport sans secret même si la fenêtre du studio ne démarre pas.
+          Fiabilité des téléchargements, reprise après interruption et conservation des fichiers lors des erreurs de renommage/import. ZIP publiés de façon atomique, historique des packs prêts et téléchargements partiels pour reprendre un transfert. Connexion Supabase configurable dans le navigateur privé sans arrêter le studio. Catégories et sauvegardes antérieures conservées.
 
           La correction de WinError 6 au démarrage sans console reste vérifiée par deux lancements Windows avec les trois handles standards NULL : premier démarrage puis installation configurée, ouverture des services et fermeture propre sans perte de données.
 

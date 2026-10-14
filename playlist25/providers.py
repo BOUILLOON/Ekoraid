@@ -134,8 +134,13 @@ def _safe_reason(text: str) -> str:
 
 
 def _duration(value):
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
-        return float(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            duration = float(value)
+        except (OverflowError, ValueError):
+            return None
+        if math.isfinite(duration) and duration >= 0:
+            return duration
     return None
 
 
@@ -148,7 +153,9 @@ def _entry(info, position: int, cfg) -> dict:
     duration = _duration(info.get("duration"))
     available, reason = valid_id, "" if valid_id else "Identifiant de vidéo absent ou invalide."
     availability = info.get("availability")
-    if availability in {"private", "premium_only", "subscriber_only", "needs_auth", "unavailable"} or title.lower() in {"[private video]", "private video", "[deleted video]", "deleted video"}:
+    if availability is not None and not isinstance(availability, str):
+        available, reason = False, "YouTube a retourné un état d'accessibilité invalide."
+    elif availability in {"private", "premium_only", "subscriber_only", "needs_auth", "unavailable"} or title.lower() in {"[private video]", "private video", "[deleted video]", "deleted video"}:
         available, reason = False, "Vidéo privée, supprimée ou réservée à un accès authentifié."
     if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
         available, reason = False, "Les directs en cours et à venir sont refusés."
@@ -174,8 +181,11 @@ def search(query: str, cfg, *, limit: int | None = None) -> list[dict]:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_MAX_RESULTS:
         raise SourceError("La fenêtre de recherche demandée est invalide.")
     info, _ = _metadata(f"ytsearch{limit}:{query.strip()}", cfg, playlist=True, limit=limit)
+    raw_entries = info.get("entries")
+    if not isinstance(raw_entries, list):
+        raise SourceError("YouTube n'a pas fourni de résultats de recherche exploitables.", "invalid_provider_result", status=502)
     entries, seen = [], set()
-    for i, item in enumerate((info.get("entries") or [])[:limit], 1):
+    for i, item in enumerate(raw_entries[:limit], 1):
         entry = _entry(item, i, cfg)
         if entry["available"] and entry["video_id"] not in seen:
             seen.add(entry["video_id"])
@@ -252,7 +262,11 @@ def analyze(url: str, cfg, mode: str | None = None) -> dict:
     else:
         entries, warnings, complete, known_indices = [_entry(info, 1, cfg)], [], True, 0
     raw_count = info.get("playlist_count") or info.get("n_entries")
-    count = int(raw_count) if isinstance(raw_count, (int, float)) and not isinstance(raw_count, bool) and math.isfinite(raw_count) and raw_count >= 0 and int(raw_count) == raw_count else None
+    count = None
+    if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0:
+        count = raw_count
+    elif isinstance(raw_count, float) and math.isfinite(raw_count) and raw_count >= 0 and raw_count.is_integer():
+        count = int(raw_count)
     if cap is not None and (len(raw_entries) > cap or count is not None and count > cap):
         complete = False
         warnings.append(f"Limite de {cap} éléments atteinte : cette analyse n'est pas complète. Augmentez la limite explicitement pour récupérer la suite.")

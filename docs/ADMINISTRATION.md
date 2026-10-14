@@ -12,7 +12,7 @@ Pour les **25 ans de Fanny, le 17 octobre 2026 dès 19 h, à la salle des fêtes
 
 ## 1. Installer le studio sur Windows
 
-La livraison Windows **Studio-Fanny-Windows.zip** se télécharge depuis la [release `.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3). Elle comprend le studio et ses outils ; les contrôles réalisés sont indiqués dans les notes de la release et le [rapport de validation](VALIDATION.md).
+La livraison Windows **Studio-Fanny-Windows.zip** se télécharge depuis la [dernière release Windows](https://github.com/BOUILLOON/Ekoraid/releases/latest). Elle comprend le studio et ses outils ; les contrôles réalisés sont indiqués dans les notes de la release et le [rapport de validation](VALIDATION.md).
 
 1. [Téléchargez Studio-Fanny-Windows.zip](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip).
 2. Faites un clic droit sur l’archive, puis **Extraire tout**. Gardez le dossier extrait entier.
@@ -23,13 +23,16 @@ Python, Node.js, FFmpeg et ffprobe sont inclus. Vous n’avez pas à les install
 
 ## 2. Relier ce PC à la collecte publique
 
-Cette configuration se fait une seule fois sur votre PC, pendant le premier démarrage. Pour la faire plus tard, cliquez sur **Arrêter le studio**, puis sur **Configurer la connexion** dans la fenêtre de l’application.
+Cette configuration se fait sur votre PC dans le **navigateur privé**, sans arrêter le studio. Depuis <http://127.0.0.1:8001>, ouvrez **Réglages & diagnostics**, puis le formulaire de connexion à Supabase.
 
-1. Utilisez l’adresse du projet : `https://dpcohlyczczaqovblzin.supabase.co`.
-2. Cliquez sur **Ouvrir la page de ma clé Supabase** et connectez-vous à votre compte Supabase.
-3. Copiez la clé **Secret** ou **service_role** du projet, réservée à l’administration, dans le champ privé de l’application. Cliquez sur **Enregistrer et ouvrir le studio**.
+1. Dans **Adresse du projet Supabase**, utilisez `https://dpcohlyczczaqovblzin.supabase.co`.
+2. Dans le tableau de bord Supabase du projet, ouvrez **Project Settings → API Keys** et copiez la clé **Secret** ou **service_role**. La clé publique et un jeton de compte personnel ne conviennent pas.
+3. Collez cette clé dans le champ privé du studio et cliquez sur **Vérifier et enregistrer la connexion**. Une clé laissée vide conserve celle déjà configurée ; elle n’est jamais réaffichée dans le formulaire.
+4. Après le message de réussite, cliquez sur **Récupérer les propositions du site public**. Les titres et votes sont récupérés, sans préparer d’audio.
 
-La connexion est vérifiée avant son enregistrement. En cas de refus, la configuration précédente est conservée. La clé reste sur votre PC : ne la collez ni dans une conversation, ni dans le site public, ni dans une capture d’écran. Le studio peut démarrer sans cette connexion ; renseignez-la avant de récupérer la collecte publique. La clé publique du site ne donne pas ces droits d’administration.
+La connexion est vérifiée avant son enregistrement et s’applique immédiatement. En cas de refus, la configuration précédente et vos fichiers sont conservés. La clé reste sur votre PC : ne la collez ni dans une conversation, ni dans le site public, ni dans une capture d’écran. Le studio peut démarrer sans cette connexion ; renseignez-la avant de récupérer la collecte publique. La clé publique du site ne donne pas ces droits d’administration.
+
+Le formulaire natif du premier démarrage reste utilisable. Si vous préférez configurer depuis la fenêtre de l’application, cliquez sur **Arrêter le studio**, puis **Configurer la connexion → Enregistrer et ouvrir le studio**. Cet arrêt concerne seulement cette méthode alternative ; le formulaire du navigateur n’en a pas besoin.
 
 Sur un second PC, la connexion au même projet Supabase retrouve la même collecte ; elle ne la réinitialise pas. Les invités continuent à proposer et voter sur le même lien pendant que vous arrêtez, mettez à jour ou relancez le studio. Pour transporter aussi vos fichiers audio déjà préparés, utilisez la sauvegarde et la restauration décrites plus bas.
 
@@ -90,6 +93,8 @@ Dans **Bibliothèque locale**, **Importer mon audio** ajoute une copie d’un fi
 
 **Récupérer les fichiers déjà prêts**, dans Propositions, ouvre **Packs & exports** avec les fichiers présents correspondant à votre sélection déjà cochés. Le CSV et le JSON contiennent les propositions et les votes ; ils ne remplacent pas le ZIP audio.
 
+**Packs déjà créés** permet de retrouver les ZIP encore présents dans cette installation après la fermeture du navigateur ou un redémarrage du studio. Choisissez l’archive voulue pour la récupérer sans refaire la préparation du pack. Une archive déplacée ou supprimée n’est plus proposée comme disponible. Les sauvegardes du studio n’incluent pas ces exports : sur un autre PC, copiez le ZIP final séparément ou recréez-le depuis votre bibliothèque audio restaurée.
+
 Dans Mixxx, ajoutez le dossier `audio/` à la bibliothèque, puis importez le M3U8 du pack. Vérifiez les morceaux et les playlists après avoir déplacé le dossier et coupé Internet. La lecture de ces fichiers reste possible si le site s’arrête.
 
 ## 7. Envoyer le ZIP à un téléphone sur votre Wi-Fi
@@ -128,6 +133,38 @@ Le bouton **Écouter** ouvre un aperçu YouTube uniquement après un clic. Il n�
 
 **Plus de résultats** affiche d’autres résultats de recherche à la demande. Les repères live, reprise, remix ou instrumental proviennent du titre et restent indicatifs : ils ne certifient ni l’artiste ni la version. Les brouillons de recherche, lien, titre et artiste restent dans le même navigateur après une coupure ou une actualisation ; l’invité doit toujours confirmer l’ajout lui-même. Aucun ajout ni recherche n’est lancé automatiquement à la réouverture. Une erreur, un doublon ou une annulation conserve le brouillon ; un ajout réussi vide seulement les champs du mode envoyé s’ils n’ont pas été modifiés pendant la requête. Le catalogue conserve le défilement et le focus et propose **Afficher les nouveaux morceaux** lors de nouveaux ajouts ; ce bouton affiche ensuite les propositions les plus récentes.
 
+### Sauvegarder la liste publique sur cet appareil
+
+Sur le site public, cliquez sur **Sauvegarder la liste**, puis choisissez :
+
+- **Enregistrer la liste CSV** : toute la collecte publique, même si vous consultez un filtre ou une autre page, avec titres, artistes, liens, auteurs, votes, durées et catégories. Les demandes sans lien restent présentes.
+- **Enregistrer les liens TXT** : un lien YouTube par ligne, sans doublons, playlists comprises. Les demandes sans lien restent disponibles dans le CSV.
+
+Le navigateur enregistre le fichier sur l’appareil utilisé. Cette exportation fonctionne PC éteint ; elle ne contient ni audio, ni photos, ni données de connexion. Elle ne prépare pas les MP3 et ne remplace pas une sauvegarde complète du studio.
+
+La liste est rechargée avant l’export si la connexion fonctionne. En cas de coupure, une liste déjà chargée sur cette page peut être enregistrée comme **copie datée** ; l’avertissement précise que des ajouts ou votes plus récents peuvent manquer. Sans liste déjà chargée, attendez le retour de la connexion.
+
+### Catégories et accès organisation sur le site public
+
+Le site public permet de créer les **moments de la soirée** et de classer les propositions, sans laisser le PC allumé. Ouvrez **Espace organisation → Mon accès organisation** et connectez-vous avec le compte Supabase autorisé `info@bouillon.run`. Ce mot de passe appartient au compte Supabase ; il ne s’agit ni de la clé privée du projet, ni du mot de passe local du studio. Un pseudo invité ne donne pas cet accès.
+
+Si ce compte n’existe pas, **Créer mon accès** demande un mot de passe d’au moins 12 caractères et une confirmation par email. La création ne vous connecte pas automatiquement. Une adresse différente de celle autorisée ne reçoit pas les droits d’organisation.
+
+Si le mail de confirmation ne peut pas être envoyé ou n’arrive pas, le propriétaire du projet peut créer **ce seul compte** depuis le tableau de bord Supabase, une fois :
+
+1. Ouvrez le projet de la collecte, puis **Authentication → Users → Add user → Create user**.
+2. Saisissez `info@bouillon.run` et choisissez vous-même un mot de passe privé. Ne le partagez pas dans une conversation ou une capture d’écran.
+3. Cochez **Auto Confirm User** pour ce compte uniquement, puis confirmez sa création. Gardez la confirmation globale des autres comptes activée.
+4. Revenez sur le site public, ouvrez **Espace organisation** et cliquez sur **Se connecter** avec cet email et ce mot de passe.
+
+Le service email par défaut de Supabase peut refuser des destinataires selon sa configuration. Ces instructions ne supposent pas qu’un compte ou un email a déjà été créé ou envoyé. Si la connexion est refusée, vérifiez dans **Authentication → Users** que le compte existe et est confirmé ; l’adresse doit aussi être autorisée pour l’événement.
+
+Après connexion, **Voir des idées de moments** affiche des suggestions privées avec leurs explications. Rien n’est créé ni publié automatiquement. Pour retenir une catégorie, choisissez son nom et son ordre, puis confirmez **Créer ce moment**. La case **Proposer ce moment aux invités** décide si elle est disponible publiquement. Vous pouvez ensuite renommer, réordonner ou archiver les moments ; l’archivage conserve les anciens classements et ne supprime aucun morceau.
+
+Sur une carte, **Choisir les moments** ouvre **Classer ce morceau** ; **Enregistrer les moments** confirme une ou plusieurs catégories. Un invité peut classer ses propres propositions ; l’organisation autorisée peut classer celles de tous les invités. Une catégorie archivée peut rester dans un classement existant ou être retirée, mais n’est plus proposée pour de nouveaux classements. **Se déconnecter** ferme l’accès organisation de cet onglet.
+
+Cet accès public organise les catégories. Les vrais fichiers MP3 et leurs ZIP se préparent dans le studio local, sur le PC qui exécute l’application.
+
 ## 9. Sauvegarder et continuer sur un autre PC
 
 Une sauvegarde du studio est différente d’un pack audio pour la soirée. Elle contient la configuration privée, la base des propositions et votes, les profils et photos, et les fichiers audio locaux. Elle contient aussi le mot de passe et la clé privée Supabase : gardez ce ZIP confidentiel sur un support privé. Les exports et fichiers temporaires ne sont pas inclus ; conservez séparément votre pack final.
@@ -148,11 +185,11 @@ La connexion privée et les données locales sont reprises, tandis que l’ancie
 - Pour sauvegarder la préparation, utilisez **Sauvegarder mon studio** et gardez le ZIP privé sur un second support, en plus du pack audio final. Pour trouver vos fichiers, **Ouvrir mes fichiers** ouvre leur dossier. Par défaut, il est dans `%LOCALAPPDATA%\StudioFanny` ; une installation restaurée ou reprise peut utiliser un autre dossier.
 - Activez **Mode soirée hors ligne** avant de couper Internet. Les fichiers locaux restent utilisables ; la recherche YouTube et les nouveaux téléchargements sont désactivés. Le site public GitHub Pages nécessite Internet et reste distinct du Wi-Fi de la salle.
 
-Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le diagnostic**. Ce bouton reste disponible sans configuration ou après l’échec des services et ne modifie pas la collecte. Dans le navigateur privé, **Réglages & diagnostics → Vérifier les prérequis** contrôle aussi les outils. Pour corriger Supabase, arrêtez le studio, puis utilisez **Configurer la connexion**. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
+Si le studio ne s’ouvre pas, vérifiez le message dans la fenêtre de l’application et cliquez sur **Ouvrir le diagnostic**. Ce bouton reste disponible sans configuration ou après l’échec des services et ne modifie pas la collecte. Dans le navigateur privé, **Réglages & diagnostics → Vérifier les prérequis** contrôle aussi les outils. Si ce navigateur répond, corrigez directement la connexion Supabase dans ses réglages, sans arrêter le studio. Le formulaire natif après arrêt reste une alternative. **Ouvrir mes fichiers** ouvre le dossier des données, de l’audio et des exports.
 
 Si la fenêtre ne démarre pas, double-cliquez sur **Diagnostic-Studio.cmd**, à côté de `Studio-Fanny.exe`. Il ouvre un rapport texte dans le Bloc-notes, ou les consignes locales si l’exécutable est bloqué avant de produire le diagnostic. Aucun PowerShell ni droit administrateur n’est requis. Le rapport exclut les mots de passe, clés privées et titres des invités ; il ne change aucune donnée publique. Le lanceur produit aussi un rapport automatiquement lorsqu’une erreur de démarrage peut être capturée.
 
-Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, ouvrez ce diagnostic et [téléchargez le ZIP](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip) de la [livraison `.3`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.3). Faites **Extraire tout** dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation, avec leur configuration privée : vos données restent à leur emplacement, sans connexion Supabase à refaire.
+Si une erreur **`[WinError 6]`** apparaît avant toute fenêtre du studio, ouvrez ce diagnostic et [téléchargez le ZIP](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip) de la [dernière release Windows](https://github.com/BOUILLOON/Ekoraid/releases/latest). Faites **Extraire tout** dans un nouveau dossier et gardez tout son contenu ensemble. Conservez `%LOCALAPPDATA%\StudioFanny` et le dossier de votre ancienne installation, avec leur configuration privée : vos données restent à leur emplacement, sans connexion Supabase à refaire.
 
 Si Windows affiche exactement **« Windows a protégé votre ordinateur »**, pour ce ZIP provenant de la release officielle, cliquez sur **Informations complémentaires / More info**, puis **Exécuter quand même / Run anyway**. Cet avertissement SmartScreen est différent de WinError 6. La mention **Éditeur inconnu** peut rester, car l’application n’a pas de signature d’éditeur. Le [guide d’installation](INSTALLATION.md#pour-déboguer) détaille ces deux situations.
 

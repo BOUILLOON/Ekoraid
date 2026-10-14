@@ -32,13 +32,13 @@ def free_port():
         return server.getsockname()[1]
 
 
-def request_json(opener, url, *, data=None, csrf=None):
+def request_json(opener, url, *, data=None, csrf=None, method=None):
     headers = {}
     if data is not None:
         headers["Content-Type"] = "application/json"
     if csrf:
         headers["X-CSRF-Token"] = csrf
-    request = Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
+    request = Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers, method=method)
     with opener.open(request, timeout=30) as response:
         return json.load(response)
 
@@ -377,7 +377,58 @@ def smoke(executable: Path, *, report=None) -> dict:
             if not any(name.endswith("01-selection.m3u8") for name in names):
                 raise RuntimeError("The frozen ZIP export has no portable playlist.")
         report["checks"].append("frozen complete ZIP export and portable M3U8")
-        for path in ("/api/library", "/api/transfers/addresses", "/api/dashboard"):
+        # A second authenticated browser must discover and resume an existing
+        # pack; no browser-memory link or second ZIP creation is required.
+        reopened = build_opener(ProxyHandler({}), HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        reopened_session = request_json(reopened, bases["admin"] + "/api/session")
+        request_json(reopened, bases["admin"] + "/api/login", data={"password": environment["ADMIN_PASSWORD"]}, csrf=reopened_session["csrf_token"])
+        history = request_json(reopened, bases["admin"] + "/api/exports")["items"]
+        if len(history) != 1 or history[0]["download_url"] != pack["download_url"]:
+            raise RuntimeError("Frozen ready ZIP history did not survive a new browser session.")
+        pack_url = bases["admin"] + history[0]["download_url"]
+        with reopened.open(Request(pack_url, method="HEAD"), timeout=30) as response:
+            etag = response.headers["ETag"]
+            if response.read() or int(response.headers["Content-Length"]) != len(downloaded):
+                raise RuntimeError("Frozen ZIP HEAD returned invalid metadata.")
+        pieces = []
+        for value in ("bytes=0-31", "bytes=32-"):
+            with reopened.open(Request(pack_url, headers={"Range": value, "If-Range": etag}), timeout=30) as response:
+                if response.status != 206:
+                    raise RuntimeError("Frozen ZIP did not support an authorized partial transfer.")
+                pieces.append(response.read())
+        if b"".join(pieces) != downloaded:
+            raise RuntimeError("Frozen partial ZIP transfer changed its bytes.")
+        report["checks"].append("frozen ready ZIP history after reauthentication, HEAD and two resumed ranges")
+        # Only synthetic local proposals are used. The catalog starts empty,
+        # and identical nicknames never confer ownership of another request.
+        if request_json(opener, bases["guest"] + "/api/proposals")["categories"]:
+            raise RuntimeError("Frozen studio created public categories automatically.")
+        category = request_json(opener, bases["admin"] + "/api/categories", data={"name": "Moment de test local"}, csrf=csrf)["category"]
+        guest_clients = []
+        for _ in range(2):
+            guest_client = build_opener(ProxyHandler({}), HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            guest_csrf = request_json(guest_client, bases["guest"] + "/api/session")["csrf_token"]
+            request_json(guest_client, bases["guest"] + "/api/identity", data={"nickname": "Invité de test"}, csrf=guest_csrf)
+            guest_clients.append((guest_client, guest_csrf))
+        owner, owner_csrf = guest_clients[0]
+        stranger, stranger_csrf = guest_clients[1]
+        proposal = request_json(owner, bases["guest"] + "/api/proposals", data={"kind": "manual", "title": "Demande locale de test"}, csrf=owner_csrf)["item"]
+        category_url = bases["guest"] + f"/api/proposals/{proposal['id']}/categories"
+        assigned = request_json(owner, category_url, data={"category_ids": [category["id"]]}, csrf=owner_csrf, method="PATCH")
+        if assigned["item"]["category_ids"] != [category["id"]]:
+            raise RuntimeError("Frozen owner category assignment failed.")
+        try:
+            request_json(stranger, category_url, data={"category_ids": []}, csrf=stranger_csrf, method="PATCH")
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+        else:
+            raise RuntimeError("Frozen category assignment allowed a different guest with the same nickname.")
+        request_json(opener, bases["admin"] + f"/api/categories/{category['id']}", data={"active": False}, csrf=csrf, method="PATCH")
+        if request_json(owner, bases["guest"] + "/api/proposals")["items"][0]["category_ids"] != [category["id"]]:
+            raise RuntimeError("Frozen category archive erased an existing assignment.")
+        report["checks"].append("frozen empty category catalog, organizer creation, owner-only assignment and preserved archive")
+        for path in ("/api/library", "/api/transfers/addresses", "/api/dashboard", "/api/exports"):
             try:
                 opener.open(bases["guest"] + path, timeout=15)
             except HTTPError as error:
@@ -394,7 +445,7 @@ def smoke(executable: Path, *, report=None) -> dict:
         def fixture_rows(path):
             with closing(sqlite3.connect(path)) as connection:
                 return {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-                        for table in ("guests", "sources", "proposals", "votes", "jobs", "settings", "cloud_map")}
+                        for table in ("guests", "sources", "proposals", "votes", "jobs", "settings", "cloud_map", "categories")}
         original_database = fixture_rows(database_path)
         original_audio_path = home / "data" / "audio" / source["file_path"]
         original_audio = original_audio_path.read_bytes()
@@ -411,6 +462,10 @@ def smoke(executable: Path, *, report=None) -> dict:
             raise RuntimeError("Frozen restoration did not use the new installation.")
         with closing(sqlite3.connect(restored_home / "data" / "playlist.sqlite3")) as connection:
             restored_file = connection.execute("SELECT file_path FROM sources WHERE id=?", (source["id"],)).fetchone()[0]
+            if connection.execute("SELECT id,name,active FROM categories").fetchall() != [(category["id"], "Moment de test local", 0)]:
+                raise RuntimeError("Frozen restoration did not preserve archived categories.")
+            if json.loads(connection.execute("SELECT category_ids FROM proposals WHERE id=?", (proposal["id"],)).fetchone()[0]) != [category["id"]]:
+                raise RuntimeError("Frozen restoration did not preserve proposal category assignments.")
         if not restored_file or (restored_home / "data" / "audio" / restored_file).read_bytes() != original_audio:
             raise RuntimeError("Frozen restoration did not preserve and relocate the verified MP3.")
         if private_path.read_bytes() != original_config or fixture_rows(database_path) != original_database:

@@ -1,6 +1,6 @@
 "use strict";
 
-// Aucun SDK distant, cookie d'administration ou clé privilégiée dans cette page.
+// Aucun SDK distant ni clé privilégiée. Auth organisation : JWT temporaire en sessionStorage.
 (() => {
   const TOKEN_NAME = "playlist25-cloud-guest-v1";
   const config = () => window.PLAYLIST_CLOUD || {};
@@ -79,10 +79,11 @@
       fail("Ce lien contient un morceau et une playlist. Choisissez ce morceau seulement ou toute la playlist.", 409, {need_choice: true});
     return {videoId: id, playlistId, kind: mode === "playlist" || !id ? "playlist" : "youtube"};
   }
-  async function rpc(name, payload) {
+  async function rpc(name, payload, accessToken = null) {
     const cfg = publicConfig();
     const headers = { "Content-Type": "application/json", apikey: cfg.key };
-    if (cfg.legacy) headers.Authorization = `Bearer ${cfg.key}`;
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    else if (cfg.legacy) headers.Authorization = `Bearer ${cfg.key}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     let response;
@@ -97,6 +98,7 @@
       fail("La collecte est momentanément inaccessible. Vérifiez Internet puis réessayez ; vos saisies sont conservées.", 503);
     } finally { clearTimeout(timeout); }
     if (!response.ok) {
+      if (accessToken && response.status === 401) fail("Votre connexion organisation a expiré. Reconnectez-vous.", 401);
       if (response.status === 401 || response.status === 403)
         fail("L’accès Supabase est refusé. L’organisateur doit vérifier la clé publique et le script SQL.", response.status);
       fail("La collecte n’a pas répondu. L’organisateur doit vérifier le projet Supabase et le script SQL.", response.status);
@@ -104,6 +106,91 @@
     if (data?.error) fail(data.error, data.status || 400, data.need_choice ? {need_choice: true} : null);
     return data;
   }
+  const authKey = () => `playlist25-organizer-session-v1:${publicConfig().url}`;
+  let refreshPending = null, authGeneration = 0;
+  function clearOrganizer() { authGeneration++; try { sessionStorage.removeItem(authKey()); } catch { /* Aucun secret dans un journal. */ } }
+  function organizerSession() {
+    try {
+      const session = JSON.parse(sessionStorage.getItem(authKey()) || "null");
+      if (!session) return null;
+      if (typeof session.access_token !== "string" || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(session.access_token)
+          || session.access_token.length > 16000 || typeof session.refresh_token !== "string" || !session.refresh_token
+          || session.refresh_token.length > 4096 || !Number.isFinite(session.expires_at)) { clearOrganizer(); return null; }
+      return session;
+    } catch { return null; }
+  }
+  function saveOrganizer(data) {
+    const expiresAt = Number(data.expires_at) || Math.floor(Date.now() / 1000) + Number(data.expires_in || 3600);
+    const session = {access_token: data.access_token, refresh_token: data.refresh_token, expires_at: expiresAt};
+    if (typeof session.access_token !== "string" || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(session.access_token)
+        || session.access_token.length > 16000 || typeof session.refresh_token !== "string" || !session.refresh_token
+        || session.refresh_token.length > 4096 || !Number.isFinite(expiresAt)) fail("Supabase n’a pas renvoyé de connexion valide.", 503);
+    try { sessionStorage.setItem(authKey(), JSON.stringify(session)); authGeneration++; }
+    catch { fail("Autorisez le stockage temporaire de ce site pour ouvrir l’espace organisation.", 503); }
+  }
+  async function authRequest(path, body, accessToken = null) {
+    const cfg = publicConfig(), headers = {"Content-Type": "application/json", apikey: cfg.key};
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 15000);
+    let response, data;
+    try {
+      response = await fetch(`${cfg.url}/auth/v1/${path}`, {method: "POST", headers, credentials: "omit", redirect: "error",
+        signal: controller.signal, body: JSON.stringify(body)});
+      data = response.status === 204 ? {} : await response.json();
+    } catch { fail("La connexion Supabase est momentanément indisponible. Réessayez dans un instant.", 503); }
+    finally { clearTimeout(timeout); }
+    if (!response.ok) {
+      if (data?.error_code === "email_not_confirmed" || /email not confirmed/i.test(data?.msg || data?.error_description || ""))
+        fail("Confirmez d’abord votre adresse avec le lien reçu par e-mail, puis reconnectez-vous.", 403);
+      if (response.status === 429 || /email.*(?:rate|send)/i.test(data?.error_code || ""))
+        fail("Supabase limite actuellement l’envoi des e-mails. Réessayez plus tard ou demandez au propriétaire du projet de créer votre compte dans Authentication → Users.", response.status);
+      fail("Supabase a refusé la connexion. Vérifiez l’adresse, le mot de passe et la confirmation de l’e-mail.", response.status);
+    }
+    return data;
+  }
+  async function organizerToken(force = false) {
+    const session = organizerSession();
+    if (!session) fail("Connectez-vous à l’espace organisation.", 401);
+    if (!force && session.expires_at > Date.now() / 1000 + 30) return session.access_token;
+    if (!refreshPending) refreshPending = (async () => {
+      const generation = authGeneration;
+      try {
+        const refreshed = await authRequest("token?grant_type=refresh_token", {refresh_token: session.refresh_token});
+        if (generation !== authGeneration) fail("La connexion a été fermée. Reconnectez-vous.", 401);
+        saveOrganizer(refreshed);
+      }
+      catch (error) { if (generation === authGeneration) clearOrganizer(); throw error; }
+      finally { refreshPending = null; }
+    })();
+    await refreshPending;
+    const refreshed = organizerSession();
+    if (!refreshed) fail("La connexion a été fermée. Reconnectez-vous.", 401);
+    return refreshed.access_token;
+  }
+  async function organizerRpc(name, body) {
+    try { return await rpc(name, body, await organizerToken()); }
+    catch (error) {
+      if (error.status !== 401) throw error;
+      return rpc(name, body, await organizerToken(true));
+    }
+  }
+  function credentials(body, signup = false) {
+    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail("Saisissez une adresse e-mail valide.", 422);
+    if (typeof body.password !== "string" || body.password.length < (signup ? 12 : 1) || body.password.length > 1024
+        || /[\x00-\x1f\x7f]/.test(body.password)) fail(signup ? "Choisissez un mot de passe de 12 caractères minimum." : "Saisissez votre mot de passe.", 422);
+    return {email, password: body.password};
+  }
+  // Confirmation e-mail Supabase : retirer immédiatement les jetons du fragment.
+  try {
+    const callback = new URL(location.href), fields = new URLSearchParams(callback.hash.slice(1));
+    if (fields.has("access_token") || fields.has("refresh_token")) {
+      try {
+        if (fields.get("access_token") && fields.get("refresh_token")) saveOrganizer({access_token: fields.get("access_token"),
+          refresh_token: fields.get("refresh_token"), expires_in: Number(fields.get("expires_in") || 3600)});
+      } finally { window.history?.replaceState(null, "", callback.pathname + callback.search); }
+    }
+  } catch { /* Le formulaire de connexion reste disponible ; aucun jeton journalisé. */ }
   async function edge(payload) {
     const cfg = publicConfig();
     const headers = {"Content-Type": "application/json", apikey: cfg.key};
@@ -156,6 +243,53 @@
     const url = new URL(path, "https://playlist.invalid");
     if (url.origin !== "https://playlist.invalid") fail("Route non autorisée.", 404);
     const route = url.pathname;
+    if (method === "GET" && route === "/api/organizer/session") {
+      if (!organizerSession()) return {authenticated: false, organizer: null};
+      try {
+        const result = await organizerRpc("playlist25_organizer_session", {});
+        if (!result.authenticated) clearOrganizer();
+        return result;
+      } catch (error) { if (error.status === 401 || error.status === 403) { clearOrganizer(); return {authenticated: false, organizer: null}; } throw error; }
+    }
+    if (method === "POST" && route === "/api/organizer/login") {
+      const input = credentials(body); clearOrganizer(); const generation = authGeneration;
+      const result = await authRequest("token?grant_type=password", input);
+      if (generation !== authGeneration) fail("La connexion a été annulée. Réessayez.", 401);
+      saveOrganizer(result);
+      try {
+        const verified = await organizerRpc("playlist25_organizer_session", {});
+        if (!verified.authenticated) fail("Ce compte confirmé n’est pas autorisé à gérer cet événement.", 403);
+        return verified;
+      } catch (error) { clearOrganizer(); throw error; }
+    }
+    if (method === "POST" && route === "/api/organizer/signup") {
+      const input = credentials(body, true);
+      const callback = new URL(location.href); callback.hash = ""; callback.search = "";
+      await authRequest(`signup?redirect_to=${encodeURIComponent(callback.href)}`, input);
+      return {confirmation_required: true, message: "Vérifiez votre boîte e-mail et confirmez l’adresse avec le lien Supabase, puis connectez-vous. Seul un compte autorisé peut gérer les catégories."};
+    }
+    if (method === "POST" && route === "/api/organizer/logout") {
+      const session = organizerSession(); clearOrganizer();
+      if (session) { try { await authRequest("logout?scope=local", {}, session.access_token); } catch { /* Le navigateur reste déconnecté si le réseau est indisponible. */ } }
+      return {authenticated: false, organizer: null};
+    }
+    if (method === "GET" && route === "/api/categories") return rpc("playlist25_categories_list", {});
+    if (method === "GET" && route === "/api/categories/suggestions") return organizerRpc("playlist25_category_suggestions", {});
+    const category = /^\/api\/categories\/([0-9a-f]{32})$/.exec(route);
+    if (method === "POST" && route === "/api/categories" || method === "PATCH" && category) {
+      const fields = ["name", "sort_order", "active"];
+      if (Object.keys(body).some(key => !fields.includes(key))) fail("Champ de catégorie non autorisé.", 422);
+      return organizerRpc("playlist25_organizer_category", {p_category: category ? {...body, id: category[1]} : body});
+    }
+    const assignment = /^\/api\/proposals\/([1-9][0-9]*)\/categories$/.exec(route);
+    if (method === "PATCH" && assignment) {
+      const id = Number(assignment[1]);
+      if (!Number.isSafeInteger(id) || Object.keys(body).some(key => key !== "category_ids") || !Array.isArray(body.category_ids)
+          || body.category_ids.some(value => typeof value !== "string" || !/^[0-9a-f]{32}$/.test(value))
+          || new Set(body.category_ids).size !== body.category_ids.length) fail("Choix de catégories invalide.", 422);
+      if (organizerSession()) return organizerRpc("playlist25_organizer_proposal_categories", {p_proposal_id: id, p_category_ids: body.category_ids, p_token: guestToken()});
+      return rpc("playlist25_proposal_categories", {p_token: guestToken(), p_proposal_id: id, p_category_ids: body.category_ids});
+    }
     const token = guestToken();
     if (method === "GET" && route === "/api/search") {
       const query = (url.searchParams.get("q") || "").trim();

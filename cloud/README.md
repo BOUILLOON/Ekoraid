@@ -1,6 +1,6 @@
 # Collecte publique gratuite : GitHub Pages + Supabase
 
-GitHub Pages sert l’interface invités ; Supabase conserve les propositions et les votes. **Votre PC peut être éteint pendant la collecte.** L’administration, les téléchargements et le pack Mixxx restent sur votre PC. Le jour de la soirée, utilisez les fichiers du pack : le site Internet public a besoin d’Internet.
+GitHub Pages sert l’interface invités ; Supabase conserve les propositions, votes et catégories. **Votre PC peut être éteint pendant la collecte et la gestion des catégories sur le site public.** Fanny peut créer ses catégories et classer les propositions après connexion avec son compte Supabase Auth autorisé. Les invités n’ont pas besoin de compte et peuvent classer leurs propres propositions. Les téléchargements et le pack Mixxx restent sur votre PC. Le jour de la soirée, utilisez les fichiers du pack : le site Internet public a besoin d’Internet.
 
 Le site invités est publié à **https://bouilloon.github.io/Ekoraid/**. Le workflow [de publication](https://github.com/BOUILLOON/Ekoraid/actions/runs/38157177635) a terminé avec succès le 11 octobre 2026, après activation de la source **GitHub Actions** dans Pages. Les étapes ci-dessous permettent de reproduire le déploiement.
 
@@ -13,11 +13,11 @@ Le projet choisi est `https://dpcohlyczczaqovblzin.supabase.co`. Sa configuratio
 Un compte Supabase gratuit et un projet de l’offre Free suffisent. Aucun compte n’est demandé aux invités. Si vous avez déjà le projet choisi, ouvrez-le dans [le tableau de bord Supabase](https://supabase.com/dashboard).
 
 1. Ouvrez **SQL Editor → New query**.
-2. Collez le contenu complet de [`supabase.sql`](supabase.sql), puis **Run**. Le script est réexécutable et conserve les données. Ne créez pas de politique permettant à `anon` de lire ou modifier les tables.
+2. Collez le contenu complet de [`supabase.sql`](supabase.sql), puis **Run**. Exécutez ensuite [`categories.sql`](categories.sql). Les deux scripts sont réexécutables et conservent les données. Si vous réappliquez le schéma principal plus tard, réappliquez aussi l’extension catégories après lui. Ne créez pas de politique permettant à `anon` de lire ou modifier les tables.
 3. Dans **Project Settings → API Keys**, relevez l’URL du projet et la clé **publishable** (`sb_publishable_…`) ou **anon** ancienne génération. Ces deux valeurs sont publiques. Elles seules vont dans `public-config.json` et GitHub Pages.
 4. Gardez toute clé **secret** / **service_role**, le mot de passe de base de données et les jetons personnels hors du dépôt et du navigateur invités.
 
-Le SQL crée ses propres tables `playlist25_*` : sessions, sources, propositions, votes, invitations et quotas. Toutes ont RLS activé, sans permission de table pour `anon`/`authenticated`. Le public dispose seulement des RPC limitées de session, pseudo, catalogue, proposition, vote et budget de recherche. Les RPC de snapshot, invitations et publication sont réservées au rôle privilégié.
+Le SQL crée ses propres tables `playlist25_*` : sessions, sources, propositions, votes, invitations, catégories, adresses organisatrices autorisées et quotas. Toutes ont RLS activé, sans permission de table pour `anon`/`authenticated`. Le public utilise des RPC limitées. Les suggestions de catégories et leur gestion exigent un compte Auth autorisé et confirmé ; les suggestions ne créent aucune catégorie automatiquement. La liste d’adresses autorisées reste privée. Les RPC de snapshot, invitations, autorisation d’adresses et publication depuis le PC sont réservées au rôle privilégié.
 
 Pour un déploiement depuis cette session Codex, un jeton personnel `SUPABASE_ACCESS_TOKEN` autorisé sur ce projet peut être injecté dans les **réglages sécurisés de l’environnement**, jamais envoyé dans le chat ni commité. Le script prévu utilise ce jeton sans afficher les réponses privées :
 
@@ -25,7 +25,32 @@ Pour un déploiement depuis cette session Codex, un jeton personnel `SUPABASE_AC
 python cloud/deploy_supabase.py
 ```
 
-Ce jeton de gestion sert au déploiement. Il est distinct de la clé publique du site et de la clé secrète utilisée par le PC pour synchroniser.
+Ce jeton de gestion sert au déploiement. Il est distinct de la clé publique du site et de la clé secrète utilisée par le PC pour synchroniser. Le helper applique le schéma principal puis les catégories **dans une transaction commune**, vérifie les 21 fonctions attendues et contrôle la nouvelle RPC anonyme après rechargement du cache Supabase. Ce contrôle ne crée ni compte, ni invité, ni proposition. Une erreur de vérification ne doit pas être présentée comme un site prêt.
+
+```powershell
+python cloud/deploy_supabase.py --sql-only
+python cloud/deploy_supabase.py --functions-only
+```
+
+`--sql-only` conserve l’extension catégories, la liste d’adresses autorisées et l’historique. `--functions-only` déploie uniquement la recherche YouTube et ne touche pas au schéma. Après une migration, une nouvelle RPC peut brièvement répondre 404 pendant le rechargement du cache PostgREST ; le helper fait six vérifications bornées puis signale explicitement une disponibilité non confirmée si nécessaire.
+
+### Accès organisation sur le site public
+
+La connexion **Organisation** est indépendante du mot de passe du studio Windows. Elle utilise l’e-mail et le mot de passe du compte Supabase Auth ; aucun mot de passe n’est transmis dans le chat ni enregistré dans le dépôt. Les JWT restent dans `sessionStorage`, dans l’onglet du navigateur, et sont retirés lors de la déconnexion. Une inscription ou un pseudo invité ne donne aucun droit d’organisation.
+
+Dans Supabase **Authentication → URL Configuration**, définissez **Site URL** sur `https://bouilloon.github.io/Ekoraid/` et autorisez cette URL dans **Redirect URLs**. Pour un autre déploiement, utilisez son URL Pages. Gardez la confirmation des e-mails activée. Le lien de confirmation revient sur le site ; ses jetons sont retirés du fragment de l’URL après récupération par l’adaptateur.
+
+Le propriétaire du projet autorise l’adresse choisie dans **SQL Editor** avec :
+
+```sql
+select public.playlist25_approve_organizer('adresse-organisatrice@example.com', true);
+```
+
+Cette opération peut précéder la création du compte. Elle est réservée au propriétaire/service_role ; ne placez aucune clé privilégiée dans le site. Pour retirer les droits, appelez la même RPC avec `false`. Le serveur vérifie l’identité `auth.uid()` et l’adresse confirmée dans `auth.users`, puis l’autorisation privée ; il ne fait confiance ni au pseudo ni à une adresse déclarée par le navigateur.
+
+Sur le site, **Organisation → Créer mon accès** permet une inscription explicite avec un mot de passe de 12 caractères minimum. La création du compte demande une confirmation ; elle ne connecte pas automatiquement et ne promet pas la livraison de l’e-mail. L’envoi par défaut de Supabase peut être restreint, et aucun SMTP personnalisé n’a été validé ici. Si le mail est refusé ou n’arrive pas, le propriétaire peut ouvrir **Authentication → Users → Add user → Create new user**, renseigner l’adresse autorisée, choisir le mot de passe dans ce tableau de bord privé et confirmer individuellement ce compte avec **Auto Confirm User**. Cela ne change pas la confirmation globale des autres inscriptions. Connectez-vous ensuite sur le site public. Aucune connexion réelle avec le mot de passe de Fanny n’est revendiquée par les tests automatisés.
+
+Après connexion, créez les moments de votre choix ou utilisez une suggestion pour préremplir le formulaire, puis enregistrez explicitement. Vous pouvez renommer, ordonner et archiver les catégories, ainsi que classer toutes les propositions. L’archivage conserve les anciennes affectations et leurs noms. Une catégorie archivée peut rester sur un morceau déjà classé, ou en être retirée ; elle ne peut pas être nouvellement attribuée. Aucun audio n’est préparé par ces actions publiques.
 
 ## 2. Déployer la recherche de morceaux
 
@@ -55,7 +80,7 @@ Sans cette clé, la recherche publique YouTube est utilisée. Avec cette clé, l
 
 ## 3. Publier le site invités sur GitHub Pages
 
-Un compte GitHub et un dépôt public permettent d’utiliser Pages gratuitement. Aucun abonnement ni domaine acheté n’est nécessaire. Le site déployé contient seulement `index.html`, la feuille de style, le code invités, l’adaptateur cloud, une illustration locale et la clé publique. L’administrateur, SQLite, audio, journaux et `.env.local` sont exclus par une liste de fichiers explicite.
+Un compte GitHub et un dépôt public permettent d’utiliser Pages gratuitement. Aucun abonnement ni domaine acheté n’est nécessaire. Le site déployé contient seulement `index.html`, la feuille de style, le code invités avec la gestion publique des catégories, l’adaptateur cloud, une illustration locale et la clé publique. Le studio privé sur le PC, SQLite, audio, journaux et `.env.local` sont exclus par une liste de fichiers explicite.
 
 Pour construire le site à partir de la configuration publique déjà fournie :
 
@@ -83,7 +108,7 @@ Le workflow est manuel : un commit ne publie pas automatiquement. Si les workflo
 
 ## 4. Récupérer la collecte sur votre PC
 
-[Téléchargez la version Windows autonome corrigée](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip), disponible dans la [release `.2`](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.11.2) et vérifiée sans console. Faites **Extraire tout**, puis double-cliquez sur **Studio-Fanny.exe** dans le dossier `Studio-Fanny`. Gardez le dossier extrait entier. Le [guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée) détaille le premier démarrage.
+[Téléchargez la dernière version Windows autonome](https://github.com/BOUILLOON/Ekoraid/releases/latest/download/Studio-Fanny-Windows.zip). Faites **Extraire tout**, puis double-cliquez sur **Studio-Fanny.exe** dans le dossier `Studio-Fanny`. Gardez le dossier extrait entier. Le [guide d’installation](../docs/INSTALLATION.md#windows-11--version-autonome-recommandée) détaille le premier démarrage et les validations disponibles pour chaque version.
 
 Au premier démarrage, ou après **Arrêter le studio → Configurer la connexion**, renseignez le projet `https://dpcohlyczczaqovblzin.supabase.co`. Cliquez sur **Ouvrir la page de ma clé Supabase**, copiez sa clé **Secret** ou **service_role** dans le champ privé, puis **Enregistrer et ouvrir le studio**. La connexion est vérifiée avant d’être enregistrée ; une erreur conserve la configuration précédente.
 
@@ -145,11 +170,14 @@ Tests locaux reproductibles, sans téléchargement de musiques :
 ```powershell
 node cloud/test_search.mjs
 node cloud/test_adapter.mjs
+node cloud/test_categories_adapter.mjs
 python cloud/test_sync.py
 python cloud/test_sql.py
+python cloud/test_categories_sql.py
+python -m pytest -q tests/test_deploy_helpers.py tests/test_cloud_routes_deploy.py
 ```
 
-Le dernier test utilise Docker et un PostgreSQL 16 jetable, sans port publié. Il applique le SQL deux fois puis vérifie l’isolation des sessions, les doublons, invitations, quotas, votes concurrents/retraits, refus d’accès aux tables et RPC privées, publication atomique et fusion des votes. Le conteneur est arrêté à la fin.
+Les tests SQL utilisent Docker et PostgreSQL 16 jetable, sans port publié. Le premier vérifie les sessions, doublons, invitations, quotas, votes concurrents/retraits, accès privés, publication atomique et fusion. Le test catégories applique aussi le déploiement composé dans une transaction : il vérifie que les propriétaires, votes, adresses autorisées et catégories survivent aux répétitions, que seuls les comptes confirmés/autorisés peuvent gérer les catégories et que deux invités au même pseudo ne peuvent pas modifier les propositions de l’autre. Les conteneurs sont arrêtés à la fin. Le contexte Auth de ce test est simulé ; il ne crée aucun vrai compte et n’envoie aucun e-mail.
 
 Avec Deno installé, les tests de la fonction Edge :
 
@@ -169,6 +197,6 @@ Après publication, sur le lien Pages réel :
 - Avec un second navigateur portant le même pseudo, votez puis retirez le vote ; les sessions restent indépendantes.
 - Vérifiez que liens/manuels fonctionnent si la recherche échoue, puis testez avec votre PC éteint.
 - Récupérez la collecte sur le PC, vérifiez les votes, publiez une fermeture et confirmez-la sur le lien public.
-- Vérifiez que l’URL publique ne contient aucune administration, bibliothèque audio ou commande de téléchargement.
+- Vérifiez que le site public ne contient aucune bibliothèque audio ni commande de téléchargement. L’espace Organisation public sert à gérer les catégories et exige un compte Auth autorisé.
 
-Pour déboguer : une erreur RPC 404 indique généralement que `supabase.sql` manque ; une recherche 404 indique que `music-search` manque ; une erreur 401/403 de synchronisation indique une clé locale incorrecte ou des droits manquants. Une recherche 503 peut venir de YouTube : conserver les parcours lien/manuels et, si souhaité, activer l’API gratuite optionnelle. Consultez les journaux Edge dans Supabase sans publier de secrets.
+Pour déboguer : une erreur RPC 404 indique généralement un script SQL manquant ou un cache en cours de rechargement ; les RPC catégories/organisation nécessitent `categories.sql` après le schéma principal. Une recherche 404 indique que `music-search` manque ; une erreur 401/403 de synchronisation indique une clé locale incorrecte ou des droits manquants. Un compte Auth non confirmé ou absent de la liste autorisée ne peut pas organiser l’événement. Une recherche 503 peut venir de YouTube : conserver les parcours lien/manuels et, si souhaité, activer l’API gratuite optionnelle. Consultez les journaux Edge dans Supabase sans publier de secrets.

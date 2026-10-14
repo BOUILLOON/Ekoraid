@@ -175,12 +175,19 @@ def _canonical_database(source: Path, destination: Path) -> dict[str, int]:
             target.execute("CREATE UNIQUE INDEX proposals_owner_source_live_idx ON proposals(source_id,guest_id) WHERE withdrawn_at IS NULL")
             expected = {row[0] for row in target.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             objects = list(original.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
-            if {name for kind, name, _ in objects if kind == "table"} != expected:
+            available = {name for kind, name, _ in objects if kind == "table"}
+            if available - expected or expected - available - {"categories"}:
                 raise BackupError("La sauvegarde ne contient pas une base complète du studio.")
             if any(kind not in {"table", "index"} or (sql and re.search(r"\bVIRTUAL\s+TABLE\b", sql, re.I)) for kind, _, sql in objects):
                 raise BackupError("Le schéma SQLite de cette archive n’est pas pris en charge.")
             for table in sorted(expected):
-                if _columns(original, table) != _columns(target, table):
+                if table not in available:
+                    continue
+                original_columns, target_columns = _columns(original, table), _columns(target, table)
+                optional = {"category_ids", "categories_dirty"} if table == "proposals" else set()
+                missing = set(target_columns) - set(original_columns)
+                if (missing - optional or set(original_columns) - set(target_columns) or
+                        any(original_columns[key] != target_columns[key] for key in original_columns)):
                     raise BackupError("Le schéma SQLite de cette archive n’est pas pris en charge.")
                 if sorted(row[2:] for row in original.execute(f'PRAGMA foreign_key_list("{table}")')) != sorted(row[2:] for row in target.execute(f'PRAGMA foreign_key_list("{table}")')):
                     raise BackupError("Les références SQLite de cette archive ne sont pas valides.")
@@ -189,8 +196,8 @@ def _canonical_database(source: Path, destination: Path) -> dict[str, int]:
             # Foreign keys are checked after all tables were copied, so original
             # IDs and cyclic order-independent references remain unchanged.
             with target:
-                for table in sorted(expected):
-                    names = list(_columns(target, table))
+                for table in sorted(available):
+                    names = list(_columns(original, table))
                     columns = ",".join(f'"{name}"' for name in names)
                     marks = ",".join("?" for _ in names)
                     target.executemany(f'INSERT INTO "{table}"({columns}) VALUES({marks})', original.execute(f'SELECT {columns} FROM "{table}"'))
@@ -198,11 +205,26 @@ def _canonical_database(source: Path, destination: Path) -> dict[str, int]:
                 raise BackupError("Les références SQLite de cette archive ne sont pas valides.")
             for (path,) in target.execute("SELECT file_path FROM sources WHERE file_path IS NOT NULL AND file_path<>''"):
                 _safe_name(path)
+            # Older archives gain an empty catalogue/default selections. New
+            # category data is checked without executing any archived SQL.
+            from . import categories
+            category_ids = set()
+            for row in target.execute("SELECT id,name,sort_order FROM categories"):
+                categories.ids([row[0]])
+                if categories.clean_name(row[1]) != row[1] or type(row[2]) is not int or not 0 <= row[2] <= 2147483647:
+                    raise BackupError("Une catégorie de la sauvegarde n'est pas valide.")
+                category_ids.add(row[0])
+            for (value,) in target.execute("SELECT category_ids FROM proposals"):
+                selected = categories.ids(json.loads(value))
+                if any(category_id not in category_ids for category_id in selected):
+                    raise BackupError("Une proposition de la sauvegarde référence une catégorie absente.")
             counts = {name: target.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0] for name in ("sources", "proposals", "guests", "votes")}
             counts["photos"] = target.execute("SELECT count(*) FROM guests WHERE avatar_data<>''").fetchone()[0]
         _private(destination)
         return counts
-    except (sqlite3.Error, OSError, TypeError):
+    except BackupError:
+        raise
+    except (sqlite3.Error, OSError, TypeError, ValueError):
         raise BackupError("La base SQLite de la sauvegarde n’est pas valide.") from None
 
 

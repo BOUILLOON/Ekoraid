@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.utils import formatdate, parsedate_to_datetime
 import hashlib
 from html import escape
 import io
@@ -19,7 +20,7 @@ from urllib.parse import urlsplit
 import zipfile
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 import psutil
@@ -142,7 +143,7 @@ def _archive_path(cfg, value: str) -> Path:
     try:
         for part in relative.parts:
             component = component / part
-            if component.is_symlink():
+            if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
                 raise TransferError("Une archive partagée ne peut pas être un lien symbolique.")
         metadata = candidate.stat(follow_symlinks=False)
     except OSError as exc:
@@ -159,8 +160,13 @@ def _open_archive(cfg, value: str):
         file = os.fdopen(descriptor, "rb")
     except OSError as exc:
         raise TransferError("Impossible de lire cette archive.") from exc
-    metadata = os.fstat(file.fileno())
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+    try:
+        metadata = os.fstat(file.fileno())
+        named = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        file.close()
+        raise TransferError("Impossible de lire cette archive.") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0 or _signature(metadata) != _signature(named):
         file.close()
         raise TransferError("L'archive n'est pas un fichier lisible.")
     return path, file, metadata
@@ -168,6 +174,86 @@ def _open_archive(cfg, value: str):
 
 def _signature(metadata) -> tuple[int, int, int, int]:
     return metadata.st_size, metadata.st_mtime_ns, metadata.st_dev, metadata.st_ino
+
+
+def _download_range(header: str | None, size: int):
+    """Support one bounded byte range, including suffix/resume requests."""
+    if header is None:
+        return None
+    if len(header) > 256:
+        raise ValueError("Range too long")
+    if not header.lower().startswith("bytes="):
+        return None
+    match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", header, flags=re.I)
+    if not match or not any(match.groups()):
+        raise ValueError("Invalid byte range")
+    first, last = match.groups()
+    if not first:
+        suffix = int(last)
+        if suffix <= 0:
+            raise ValueError("Empty suffix")
+        return max(0, size - suffix), size - 1
+    start, end = int(first), int(last) if last else size - 1
+    if start >= size or end < start:
+        raise ValueError("Unsatisfiable range")
+    return start, min(end, size - 1)
+
+
+def _if_range_matches(value: str | None, etag: str, modified: int) -> bool:
+    if value is None:
+        return True
+    if value == etag:
+        return True
+    try:
+        date = parsedate_to_datetime(value)
+        return date.tzinfo is not None and int(date.timestamp()) >= modified
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+
+def archive_response(request: Request, file, metadata, filename: str):
+    """Stream from the authorized open descriptor, with resumable HTTP ranges."""
+    signature = _signature(metadata)
+    size = metadata.st_size
+    modified = metadata.st_mtime_ns // 1_000_000_000
+    etag = '"' + hashlib.sha256(repr(signature).encode("ascii")).hexdigest() + '"'
+    headers = {**SECURITY_HEADERS, "Accept-Ranges": "bytes", "ETag": etag,
+               "Last-Modified": formatdate(modified, usegmt=True),
+               "Content-Disposition": f'attachment; filename="{filename}"'}
+    try:
+        ranges = request.headers.getlist("range")
+        if_range = request.headers.get("if-range")
+        bounds = None
+        if _if_range_matches(if_range, etag, modified):
+            if len(ranges) > 1:
+                raise ValueError("Multiple range headers")
+            bounds = _download_range(ranges[0] if ranges else None, size)
+    except ValueError:
+        file.close()
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}", "Content-Length": "0"})
+    start, end = bounds if bounds is not None else (0, size - 1)
+    headers["Content-Length"] = str(end - start + 1)
+    if bounds is not None:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    if request.method == "HEAD":
+        file.close()
+        return Response(status_code=206 if bounds is not None else 200, headers=headers, media_type="application/zip")
+    def chunks():
+        remaining = end - start + 1
+        try:
+            file.seek(start)
+            while remaining:
+                if _signature(os.fstat(file.fileno())) != signature:
+                    raise OSError("Prepared ZIP changed during download")
+                chunk = file.read(min(64 * 1024, remaining))
+                if not chunk:
+                    raise OSError("Prepared ZIP ended before its declared length")
+                remaining -= len(chunk)
+                yield chunk
+        finally:
+            file.close()
+    return StreamingResponse(chunks(), status_code=206 if bounds is not None else 200,
+                             media_type="application/zip", headers=headers, background=BackgroundTask(file.close))
 
 
 def _qr_data_url(url: str) -> str:
@@ -287,18 +373,14 @@ def attach_guest_routes(app, cfg) -> None:
         html = f'''<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Récupérer le pack musical</title><link rel="icon" href="/static/placeholder.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/styles.css"></head><body class="transfer-page"><header class="topbar shell"><div class="brand"><span class="brand-icon" aria-hidden="true">♪</span><span>la playlist<span class="brand-sub">{escape(str(cfg.event_name))}</span></span></div></header><main class="shell"><section class="panel transfer-panel"><span class="eyebrow">Le pack pour la soirée</span><h1>Récupérer le pack musical</h1><p>L'organisation partage ce pack sur votre Wi-Fi. Ce lien expire après dix minutes.</p><p class="transfer-file">{escape(filename)} · {row['size'] / 1048576:.1f} Mo</p><p><a class="button primary transfer-download" href="/transfer/{escape(token, quote=True)}/download" download>Télécharger le pack ZIP <span aria-hidden="true">↓</span></a></p><p class="muted">Sur téléphone ou tablette, ouvrez ensuite le ZIP dans l'application Fichiers et extrayez son dossier audio.</p></section></main></body></html>'''
         return HTMLResponse(html, headers=SECURITY_HEADERS)
 
-    @app.get("/transfer/{token}/download", include_in_schema=False)
+    @app.api_route("/transfer/{token}/download", methods=["GET", "HEAD"], include_in_schema=False)
     def transfer_download(token: str, request: Request):
         row, file = _authorized_archive(request, cfg, token)
-        def chunks():
-            try:
-                while chunk := file.read(64 * 1024):
-                    yield chunk
-            finally:
-                file.close()
-        headers = {**SECURITY_HEADERS, "Content-Length": str(row["size"]),
-                   "Content-Disposition": f'attachment; filename="Anniversaire25-{row["export_id"][:8]}.zip"'}
-        return StreamingResponse(chunks(), media_type="application/zip", headers=headers, background=BackgroundTask(file.close))
+        metadata = os.fstat(file.fileno())
+        if _signature(metadata) != (row["size"], row["mtime_ns"], row["device"], row["inode"]):
+            file.close()
+            raise HTTPException(404, "Le pack a changé. Demandez un nouveau partage.")
+        return archive_response(request, file, metadata, f"Anniversaire25-{row['export_id'][:8]}.zip")
 
 
 class _CreateTransfer(BaseModel):

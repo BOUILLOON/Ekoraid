@@ -99,3 +99,9 @@ def test_unlimited_pack_writes_twenty_thousand_files_to_disk_and_zip(tmp_path):
             audio_names = [name for name in archive.namelist() if "/audio/" in name]
             assert len(audio_names) == COUNT
             assert archive.read(audio_names[-1]) == b"generated test bytes"
+        conn.commit()
+    with db.connect(cfg) as reopened, patch.object(exports, "verify_audio", side_effect=AssertionError("History must not recheck audio")):
+        history = exports.list_ready_packs(reopened, cfg)
+        assert len(history) == 1 and history[0]["count"] == COUNT
+        assert history[0]["size"] == Path(pack["archive"]).stat().st_size
+        assert history[0]["download_url"] == pack["download_url"]
