@@ -8,6 +8,8 @@ import subprocess
 import sys
 from urllib.parse import parse_qs, urlsplit
 
+from .processes import background_process_options
+
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 PLAYLIST_ID = re.compile(r"^[A-Za-z0-9_-]{10,150}$")
 ALLOWED_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
@@ -110,7 +112,8 @@ def _metadata(target: str, cfg, *, playlist: bool = False, limit: int | None = N
         timeout = getattr(cfg, "task_timeout", 600)
         if not playlist or limit is not None:
             timeout = min(timeout, 120)
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                timeout=timeout, check=False, **background_process_options())
     except subprocess.TimeoutExpired as exc:
         raise SourceError("L'analyse YouTube a dépassé son délai. Réessayez ou proposez le titre manuellement.", "timeout", status=503) from exc
     except OSError as exc:

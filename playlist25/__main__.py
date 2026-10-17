@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import ROOT, SOURCE_ROOT, initialize_local_config, load_settings
 from .db import init_db
+from .processes import background_process_options
 
 
 def service_command(*arguments):
@@ -157,8 +158,8 @@ def start(cfg):
             if os.name=="nt":
                 # Windowed bootloaders do not restore child standard handles
                 # automatically. The dispatch entry has reopened these streams.
-                options.update(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                               stdout=sys.stdout,stderr=sys.stderr,stdin=subprocess.DEVNULL)
+                options.update(background_process_options(new_process_group=True, windows=True))
+                options.update(stdout=sys.stdout,stderr=sys.stderr,stdin=subprocess.DEVNULL)
             process=subprocess.Popen(service_command(*command),**options)
             children.append(process)
             records.append({"pid":process.pid,"started":psutil.Process(process.pid).create_time(),"service":" ".join(command),

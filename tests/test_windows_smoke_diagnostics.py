@@ -1,8 +1,10 @@
 """CI failure diagnostics survive cleanup without starting Windows services."""
 from importlib.util import module_from_spec, spec_from_file_location
+from collections import deque
 import json
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -202,3 +204,158 @@ def test_detached_gui_diagnostic_log_is_retained_after_fixture_cleanup(tmp_path)
     tail = report["local_fixture_logs"]["gui-explorer-configured/data/diagnostics/studio.log"]
     assert "detached GUI fixture" in tail
     assert len(tail.encode("utf-8")) <= 8000
+
+
+class FakeConsoleEvents:
+    """Deterministic native events; no Windows desktop is needed for unit tests."""
+    def __init__(self, windows=()):
+        self.windows, self.pending = list(windows), deque()
+        self.processed = threading.Event()
+        self.closed = False
+
+    def visible_windows(self):
+        return list(self.windows)
+
+    def watch(self, callback):
+        self.callback = callback
+
+    def pump(self):
+        while self.pending:
+            self.callback(self.pending.popleft())
+            self.processed.set()
+
+    def close(self):
+        self.closed = True
+
+
+def console_window(handle=100, owner_pid=900, class_name="ConsoleWindowClass"):
+    return {"handle": handle, "owner_pid": owner_pid, "class": class_name}
+
+
+def test_console_guard_ignores_existing_runner_console_and_normal_gui():
+    native = FakeConsoleEvents([console_window()])
+    report = smoke.initial_report()
+    with smoke.ConsoleWindowMonitor(report=report, native_factory=lambda: native):
+        native.pending.append(console_window())
+        native.pending.append(console_window(101, 501, "TkTopLevel"))
+        assert native.processed.wait(2)
+    assert native.closed
+    assert report["console_windows"]["new_visible_windows"] == []
+    assert report["console_windows"]["observer_errors"] == []
+    assert "no visible console popups" in report["checks"][-1]
+
+
+def test_console_guard_detects_transient_conhost_outside_application_tree():
+    # No process ancestry is consulted. SHOW is enough even after the window
+    # has disappeared from the next EnumWindows snapshot.
+    native = FakeConsoleEvents([console_window()])
+    report = smoke.initial_report()
+    transient = console_window(200, 999_999)
+    with pytest.raises(RuntimeError, match="unexpected visible console"):
+        with smoke.ConsoleWindowMonitor(report=report, native_factory=lambda: native):
+            native.pending.append(transient)
+            assert native.processed.wait(2)
+    assert native.closed
+    assert report["console_windows"]["new_visible_windows"] == [transient]
+    assert report["checks"] == []
+
+
+def test_console_guard_detects_new_terminal_and_reused_window_handle():
+    native = FakeConsoleEvents([console_window()])
+    with smoke.ConsoleWindowMonitor(require_quiet=False, native_factory=lambda: native) as observer:
+        native.pending.extend((console_window(101, 333, "CASCADIA_HOSTING_WINDOW_CLASS"),
+                               console_window(100, 444)))
+        assert native.processed.wait(2)
+    assert {item["owner_pid"] for item in observer.observed.values()} == {333, 444}
+
+
+def test_console_guard_fails_closed_when_native_hook_cannot_start():
+    native = FakeConsoleEvents()
+    native.watch = Mock(side_effect=RuntimeError("SetWinEventHook unavailable"))
+    report = smoke.initial_report()
+    with pytest.raises(RuntimeError, match="observer did not start.*SetWinEventHook"):
+        with smoke.ConsoleWindowMonitor(report=report, native_factory=lambda: native):
+            pytest.fail("An unavailable observer must never count as a passing check")
+    assert native.closed and not report["checks"]
+
+
+def test_console_guard_preserves_events_even_when_fixture_itself_fails():
+    native = FakeConsoleEvents()
+    report = smoke.initial_report()
+    with pytest.raises(ValueError, match="original fixture error"):
+        with smoke.ConsoleWindowMonitor(report=report, native_factory=lambda: native):
+            native.pending.append(console_window())
+            assert native.processed.wait(2)
+            raise ValueError("original fixture error")
+    assert len(report["console_windows"]["new_visible_windows"]) == 1
+    assert not report["checks"]
+
+
+def test_native_show_callback_observes_root_console_without_visibility_recheck():
+    # A SHOW event can be delivered after a very brief console became hidden;
+    # requiring IsWindowVisible again would lose that popup.
+    native = object.__new__(smoke.WindowsConsoleEvents)
+    native.user32 = SimpleNamespace(SetWinEventHook=Mock(return_value=123), UnhookWinEvent=Mock(return_value=1))
+    native.event_type = lambda callback: callback
+    native.window = Mock(return_value=console_window())
+    observed = []
+    native.watch(observed.append)
+    arguments = native.user32.SetWinEventHook.call_args.args
+    assert arguments[:3] == (0x8002, 0x8002, None)
+    assert arguments[-3:] == (0, 0, 0)  # All PIDs/threads; out-of-context delivery.
+    native.callback(123, 0x8002, 100, -4, 0, 1, 1)  # Child/client object, not a window.
+    assert not observed
+    native.callback(123, 0x8002, 100, 0, 0, 1, 2)
+    assert observed == [console_window()]
+    native.close()
+    native.user32.UnhookWinEvent.assert_called_once_with(123)
+
+
+@pytest.mark.parametrize("visible_handle,detected,hidden_handle,error", [
+    (123, True, 0, None),
+    (123, False, 0, "calibration failed"),
+    (0, True, 0, "calibration failed"),
+    (123, True, 456, "still owns a console"),
+])
+def test_console_calibration_requires_real_detection_and_hidden_null_console(
+        tmp_path, monkeypatch, visible_handle, detected, hidden_handle, error):
+    real_identity = smoke.ConsoleWindowMonitor.identity
+    modes = []
+    class CalibrationMonitor:
+        identity = staticmethod(real_identity)
+        def __init__(self, *, require_quiet=True):
+            modes.append(require_quiet)
+            self.observed = {real_identity(console_window()): console_window()} if detected else {}
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+    monkeypatch.setattr(smoke, "ConsoleWindowMonitor", CalibrationMonitor)
+    monkeypatch.setattr(smoke, "WindowsConsoleEvents", lambda: SimpleNamespace(visible_windows=lambda: []))
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
+    monkeypatch.setattr(smoke, "hidden_process_options", lambda: {"creationflags": 0x08000000})
+    run = Mock(side_effect=[SimpleNamespace(stdout=json.dumps({"console": visible_handle})),
+                            SimpleNamespace(stdout=json.dumps({"console": hidden_handle}))])
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    report = smoke.initial_report()
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            smoke.calibrate_console_observer({}, tmp_path, report)
+        assert not report["checks"]
+    else:
+        smoke.calibrate_console_observer({}, tmp_path, report)
+        assert report["console_calibration"] == {"visible_cui_detected": True, "hidden_cui_get_console_window": 0}
+        assert modes == [False, True]
+        assert [call.kwargs["creationflags"] for call in run.call_args_list] == [0x10, 0x08000000]
+
+
+def test_harness_cui_cleanup_uses_create_no_window(monkeypatch):
+    monkeypatch.setattr(smoke, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    run = Mock()
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    process = SimpleNamespace(pid=500, poll=lambda: None, wait=Mock())
+    smoke.stop_process(process)
+    assert run.call_args.args[0] == ["taskkill", "/PID", "500", "/T", "/F"]
+    assert run.call_args.kwargs["creationflags"] == 0x08000000
+    process.wait.assert_called_once_with(timeout=15)

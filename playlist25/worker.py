@@ -20,6 +20,7 @@ import uuid
 from .db import connect, get_setting, init_db
 from .library import LibraryError, _install_file, _write_tags, resolve_audio_path, safe_filename, verify_audio
 from .providers import SourceError, parse_youtube_url, yt_dlp_command
+from .processes import background_process_options
 from .queue import claim_job, enqueue_sources, queue_snapshot, recover_jobs, set_job_state
 
 
@@ -118,7 +119,9 @@ def _stop_process(process, process_job=None) -> None:
     try:
         if os.name == "nt" and process.poll() is None:
             # Terminate the FFmpeg child too, using only the OS-created numeric PID.
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+                           **background_process_options())
         elif os.name != "nt":
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
@@ -216,7 +219,7 @@ def _download(job: dict, cfg, conn, stop: threading.Event) -> tuple[Path, dict]:
     kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL,
               "text": True, "encoding": "utf-8", "errors": "replace", "bufsize": 1}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs.update(background_process_options(new_process_group=True))
     else:
         kwargs["start_new_session"] = True
     try:

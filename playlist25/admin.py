@@ -34,6 +34,7 @@ from . import db, exports, library, providers
 from .config import Settings
 from .guest_playlists import classify_source
 from .private_config import PrivateConfigError, configure_cloud
+from .processes import background_process_options
 from .security import csrf_token, install_session, rate_limit, require_admin, require_csrf
 from .queue import enqueue_sources, queue_snapshot
 
@@ -346,7 +347,8 @@ def _present(conn: sqlite3.Connection, cfg: Settings, row: Any) -> bool:
 
 def _version(command: list[str]) -> dict[str, Any]:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=8, check=False, **background_process_options())
         output = (result.stdout or result.stderr).splitlines()
         return {"available": result.returncode == 0, "version": output[0][:350] if output else "",
                 "error": "" if result.returncode == 0 else "Commande indisponible ou en échec."}

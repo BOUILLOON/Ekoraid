@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -25,6 +26,185 @@ import uuid
 import wave
 import zipfile
 import psutil
+
+
+CONSOLE_WINDOW_CLASSES = frozenset(("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"))
+
+
+def hidden_process_options():
+    """Hide harness-owned CUI tools, while observing the application's children."""
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+class WindowsConsoleEvents:
+    """Observe actual visible console windows, including external conhost owners.
+
+    WinEvent catches brief SHOW events between enumeration passes. No window
+    titles, command lines or pre-existing runner consoles enter the report.
+    The hook and its message pump must live on the same thread.
+    """
+    def __init__(self):
+        from ctypes import wintypes
+        self.user32 = ctypes.windll.user32
+        self.message = wintypes.MSG()
+        self.enum_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        self.event_type = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                                            ctypes.c_long, ctypes.c_long, ctypes.c_ulong, ctypes.c_ulong)
+        self.user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        self.user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        self.user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        self.user32.EnumWindows.argtypes = [self.enum_type, ctypes.c_void_p]
+        self.user32.SetWinEventHook.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p,
+                                               self.event_type, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        self.user32.SetWinEventHook.restype = ctypes.c_void_p
+        self.user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+        self.user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), ctypes.c_void_p,
+                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+        self.user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self.user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self.user32.DispatchMessageW.restype = ctypes.c_ssize_t
+        self.hook = None
+
+    def window(self, handle):
+        if not handle:
+            return None
+        name = ctypes.create_unicode_buffer(256)
+        if not self.user32.GetClassNameW(handle, name, len(name)) or name.value not in CONSOLE_WINDOW_CLASSES:
+            return None
+        owner = ctypes.c_ulong()
+        self.user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+        return {"handle": int(handle), "owner_pid": owner.value, "class": name.value}
+
+    def visible_windows(self):
+        found = []
+        @self.enum_type
+        def callback(handle, _):
+            if self.user32.IsWindowVisible(handle) and (window := self.window(handle)):
+                found.append(window)
+            return True
+        if not self.user32.EnumWindows(callback, None):
+            raise RuntimeError("Native console window enumeration failed.")
+        return found
+
+    def watch(self, on_show):
+        @self.event_type
+        def callback(_hook, _event, handle, object_id, child_id, _thread, _time):
+            if object_id == 0 and child_id == 0 and (window := self.window(handle)):
+                on_show(window)
+        self.callback = callback  # Keep the C callback alive until UnhookWinEvent.
+        self.hook = self.user32.SetWinEventHook(0x8002, 0x8002, None, callback, 0, 0, 0)
+        if not self.hook:
+            raise RuntimeError("Native console SHOW-event hook could not be installed.")
+
+    def pump(self):
+        while self.user32.PeekMessageW(ctypes.byref(self.message), None, 0, 0, 1):
+            self.user32.TranslateMessage(ctypes.byref(self.message))
+            self.user32.DispatchMessageW(ctypes.byref(self.message))
+
+    def close(self):
+        if self.hook and not self.user32.UnhookWinEvent(self.hook):
+            raise RuntimeError("Native console SHOW-event hook could not be removed.")
+        self.hook = None
+
+
+class ConsoleWindowMonitor:
+    """Fail closed if a new visible console appears during the isolated fixture."""
+    def __init__(self, *, report=None, require_quiet=True, native_factory=WindowsConsoleEvents):
+        self.report, self.require_quiet, self.native_factory = report, require_quiet, native_factory
+        self.ready, self.stopping = threading.Event(), threading.Event()
+        self.baseline, self.observed, self.errors = set(), {}, []
+        self.thread = threading.Thread(target=self._run, name="console-window-observer", daemon=True)
+
+    @staticmethod
+    def identity(window):
+        return window["handle"], window["owner_pid"], window["class"]
+
+    def observe(self, window):
+        # Console hosts need not be descendants of Studio-Fanny.exe. Filtering
+        # on app PID ancestry would miss exactly the popup this guard tests.
+        key = self.identity(window)
+        if window["class"] in CONSOLE_WINDOW_CLASSES and key not in self.baseline:
+            self.observed[key] = dict(window)
+
+    def _run(self):
+        native = None
+        try:
+            native = self.native_factory()
+            self.baseline = {self.identity(window) for window in native.visible_windows()}
+            native.watch(self.observe)
+            self.ready.set()
+            while not self.stopping.is_set():
+                native.pump()
+                for window in native.visible_windows():
+                    self.observe(window)
+                self.stopping.wait(0.02)
+            native.pump()
+            for window in native.visible_windows():
+                self.observe(window)
+        except Exception as error:
+            self.errors.append(str(error))
+        finally:
+            if native is not None:
+                try:
+                    native.close()
+                except Exception as error:
+                    self.errors.append(str(error))
+            self.ready.set()
+
+    def __enter__(self):
+        self.thread.start()
+        if not self.ready.wait(5) or self.errors:
+            self.close()
+            raise RuntimeError("Native console observer did not start: " + "; ".join(self.errors))
+        return self
+
+    def close(self):
+        self.stopping.set()
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            self.errors.append("Native console observer did not stop within five seconds.")
+
+    def __exit__(self, exc_type, _error, _traceback):
+        self.close()
+        windows = list(self.observed.values())
+        if self.report is not None:
+            self.report["console_windows"] = {"observer": "EVENT_OBJECT_SHOW and EnumWindows", "poll_interval_ms": 20,
+                                               "new_visible_windows": windows, "observer_errors": list(self.errors)}
+        if exc_type is None:
+            if self.errors:
+                raise RuntimeError("Native console observer failed: " + "; ".join(self.errors))
+            if self.require_quiet and windows:
+                raise RuntimeError("Frozen local fixture opened unexpected visible console windows: " + json.dumps(windows))
+            if self.require_quiet and self.report is not None:
+                self.report["checks"].append("native WinEvent/EnumWindows guard: no visible console popups during all local fixture operations")
+
+
+def calibrate_console_observer(environment, home, report):
+    """Prove detection with a real CUI child, then prove hidden CUI has no console."""
+    probe = ("import ctypes,json,time; ctypes.windll.kernel32.GetConsoleWindow.restype=ctypes.c_void_p; "
+             "print(json.dumps({'console':ctypes.windll.kernel32.GetConsoleWindow() or 0}),flush=True); time.sleep(1)")
+    command = [sys.executable, "-c", probe]
+    with ConsoleWindowMonitor(require_quiet=False) as positive:
+        visible = subprocess.run(command, env=environment, cwd=home, capture_output=True, text=True,
+                                 check=True, timeout=10, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    if not json.loads(visible.stdout)["console"] or not positive.observed:
+        raise RuntimeError("Console observer calibration failed to detect the intentionally visible CUI window.")
+    # The calibration's own console must have closed before the real guard
+    # takes its baseline. Do not whitelist its HWND during the Studio test.
+    native = WindowsConsoleEvents()
+    deadline = time.monotonic() + 5
+    while any(ConsoleWindowMonitor.identity(window) in positive.observed for window in native.visible_windows()):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("The intentional calibration console did not close.")
+        time.sleep(0.02)
+    with ConsoleWindowMonitor():
+        hidden = subprocess.run(command, env=environment, cwd=home, capture_output=True, text=True,
+                                check=True, timeout=10, **hidden_process_options())
+        handle = json.loads(hidden.stdout)["console"]
+        if handle != 0:
+            raise RuntimeError("CREATE_NO_WINDOW CUI probe still owns a console window.")
+    report["console_calibration"] = {"visible_cui_detected": True, "hidden_cui_get_console_window": handle}
+    report["checks"].append("native console observer calibration: real visible CUI detected, CREATE_NO_WINDOW CUI has GetConsoleWindow()=0")
 
 
 def free_port():
@@ -91,7 +271,7 @@ def multipart_audio(path: Path):
 def find_gui_window(process_id, title):
     """Find only a visible, exactly named window belonging to our fixture."""
     found = []
-    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
     user32 = ctypes.windll.user32
     user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
     user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
@@ -233,7 +413,8 @@ def explorer_gui_smoke(executable, environment, home, report, *, configured=Fals
 
 def stop_process(process):
     if process.poll() is None:
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=15, check=False)
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=15, check=False,
+                       **hidden_process_options())
         process.wait(timeout=15)
 
 
@@ -271,8 +452,13 @@ def smoke(executable: Path, *, report=None) -> dict:
             admin_port = free_port()
         environment.update({"PLAYLIST25_HOME": str(home), "DATA_DIR": str(home / "data"), "ADMIN_PASSWORD": "local-smoke-test-password-2026", "SESSION_SECRET": "local-smoke-test-signing-secret-at-least-32-characters",
                             "GUEST_HOST": "127.0.0.1", "ADMIN_HOST": "127.0.0.1", "GUEST_PORT": str(guest_port), "ADMIN_PORT": str(admin_port), "COOKIE_SECURE": "false", "MIN_FREE_MB": "0"})
+        calibrate_console_observer(environment, home, report)
+        # Registered before child cleanup callbacks, so monitoring continues
+        # through their shutdown. Calibration events are in a separate guard.
+        stack.enter_context(ConsoleWindowMonitor(report=report))
         def run(*arguments, timeout=30):
-            result = subprocess.run([str(executable), *arguments], env=environment, cwd=home, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+            result = subprocess.run([str(executable), *arguments], env=environment, cwd=home, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                                    **hidden_process_options())
             if result.returncode:
                 raise RuntimeError(f"Frozen command {arguments[0]} failed ({result.returncode}): {result.stderr[-1000:]}")
             return result
@@ -287,7 +473,8 @@ def smoke(executable: Path, *, report=None) -> dict:
         report["checks"].append("frozen yt-dlp command")
         versions = {}
         for name, argument, expected in (("ffmpeg.exe", "-version", "ffmpeg version 8.1.2"), ("ffprobe.exe", "-version", "ffprobe version 8.1.2"), ("node.exe", "--version", "v24.19.0")):
-            version = subprocess.run([str(tools / name), argument], env=environment, cwd=home, capture_output=True, check=True, timeout=20).stdout.decode("utf-8", errors="replace")
+            version = subprocess.run([str(tools / name), argument], env=environment, cwd=home, capture_output=True, check=True, timeout=20,
+                                     **hidden_process_options()).stdout.decode("utf-8", errors="replace")
             if expected not in version:
                 raise RuntimeError(f"Bundled {name} reports an unexpected version.")
             versions[name] = version.splitlines()[0]
@@ -311,7 +498,8 @@ def smoke(executable: Path, *, report=None) -> dict:
         gui_home.mkdir()
         gui_environment = {**environment, "PLAYLIST25_HOME": str(gui_home), "DATA_DIR": str(gui_home / "data")}
         gui_log = stack.enter_context((home / "gui.log").open("wb"))
-        gui = subprocess.Popen([str(executable)], env=gui_environment, cwd=gui_home, stdout=gui_log, stderr=subprocess.STDOUT)
+        gui = subprocess.Popen([str(executable)], env=gui_environment, cwd=gui_home, stdout=gui_log, stderr=subprocess.STDOUT,
+                               **hidden_process_options())
         stack.callback(stop_process, gui)
         window = gui_window(gui)
         close_gui(gui, window)
@@ -320,7 +508,8 @@ def smoke(executable: Path, *, report=None) -> dict:
         bases = {"guest": f"http://127.0.0.1:{guest_port}", "admin": f"http://127.0.0.1:{admin_port}"}
         supervisor_log_path = home / "supervisor.log"
         supervisor_log = stack.enter_context(supervisor_log_path.open("wb"))
-        supervisor = subprocess.Popen([str(executable), "--service", "start"], env=environment, cwd=home, stdout=supervisor_log, stderr=subprocess.STDOUT)
+        supervisor = subprocess.Popen([str(executable), "--service", "start"], env=environment, cwd=home, stdout=supervisor_log, stderr=subprocess.STDOUT,
+                                      **hidden_process_options())
         stack.callback(stop_process, supervisor)
         for surface in ("guest", "admin"):
             wait_ready(supervisor, bases[surface], surface, opener, log_path=supervisor_log_path)
@@ -341,7 +530,8 @@ def smoke(executable: Path, *, report=None) -> dict:
         for surface in ("guest", "admin"):
             log_path = home / f"{surface}.log"
             log = stack.enter_context(log_path.open("wb"))
-            process = subprocess.Popen([str(executable), "--service", "serve", surface], env=independent_environment, cwd=home, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(executable), "--service", "serve", surface], env=independent_environment, cwd=home, stdout=log, stderr=subprocess.STDOUT,
+                                       **hidden_process_options())
             independent_services.append(process)
             stack.callback(stop_process, process)
             wait_ready(process, bases[surface], surface, opener, log_path=log_path)
@@ -357,13 +547,20 @@ def smoke(executable: Path, *, report=None) -> dict:
         auth = request_json(opener, bases["admin"] + "/api/login", data={"password": environment["ADMIN_PASSWORD"]}, csrf=session["csrf_token"])
         csrf = auth["csrf_token"]
         report["checks"].append("local administration password and CSRF")
+        def check_admin_diagnostics(client):
+            diagnostics = request_json(client, bases["admin"] + "/api/diagnostics")
+            for component, tool in (("ffmpeg", "ffmpeg.exe"), ("ffprobe", "ffprobe.exe"), ("javascript", "node.exe")):
+                if not diagnostics[component]["available"] or diagnostics[component]["version"] != versions[tool]:
+                    raise RuntimeError(f"Frozen administration diagnostic failed to run bundled {tool}.")
+        check_admin_diagnostics(opener)
         wav, mp3 = home / "authorized-test.wav", home / "authorized-test.mp3"
         with wave.open(str(wav), "wb") as output:
             output.setnchannels(1)
             output.setsampwidth(2)
             output.setframerate(16000)
             output.writeframes(b"\x00\x00" * 16000)
-        subprocess.run([str(tools / "ffmpeg.exe"), "-v", "error", "-i", str(wav), "-c:a", "libmp3lame", "-q:a", "2", str(mp3)], env=environment, capture_output=True, check=True, timeout=30)
+        subprocess.run([str(tools / "ffmpeg.exe"), "-v", "error", "-i", str(wav), "-c:a", "libmp3lame", "-q:a", "2", str(mp3)], env=environment, capture_output=True, check=True, timeout=30,
+                       **hidden_process_options())
         payload, content_type = multipart_audio(mp3)
         request = Request(bases["admin"] + "/api/library/import", data=payload, headers={"Content-Type": content_type, "X-CSRF-Token": csrf})
         with opener.open(request, timeout=30) as response:
@@ -386,6 +583,8 @@ def smoke(executable: Path, *, report=None) -> dict:
         reopened = build_opener(ProxyHandler({}), HTTPCookieProcessor(http.cookiejar.CookieJar()))
         reopened_session = request_json(reopened, bases["admin"] + "/api/session")
         request_json(reopened, bases["admin"] + "/api/login", data={"password": environment["ADMIN_PASSWORD"]}, csrf=reopened_session["csrf_token"])
+        check_admin_diagnostics(reopened)
+        report["checks"].append("real administration diagnostics twice: bundled FFmpeg, ffprobe and Node versions across browser sessions")
         history = request_json(reopened, bases["admin"] + "/api/exports")["items"]
         if len(history) != 1 or history[0]["download_url"] != pack["download_url"]:
             raise RuntimeError("Frozen ready ZIP history did not survive a new browser session.")

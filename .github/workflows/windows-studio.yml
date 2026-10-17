@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Tag de livraison (studio-windows-v…)"
         required: true
-        default: studio-windows-v2026.10.14.1
+        default: studio-windows-v2026.10.17.1
         type: string
       publish_release:
         description: Publier le ZIP vérifié dans une release GitHub
@@ -95,7 +95,7 @@ jobs:
           $description = @'
           Application Windows 11 x64 autonome : extraire tout le ZIP puis ouvrir Studio-Fanny.exe. Python, Node.js et FFmpeg sont intégrés.
 
-          Fiabilité des téléchargements, reprise après interruption et conservation des fichiers lors des erreurs de renommage/import. ZIP publiés de façon atomique, historique des packs prêts et téléchargements partiels pour reprendre un transfert. Connexion Supabase configurable dans le navigateur privé sans arrêter le studio. Catégories et sauvegardes antérieures conservées.
+          Correction des fenêtres terminal parasites au lancement et pendant les vérifications audio : FFmpeg, ffprobe, Node.js, yt-dlp et les services restent en arrière-plan. Les sorties restent capturées dans les journaux et les téléchargements peuvent toujours être arrêtés. La configuration, les propositions, les catégories et les fichiers existants restent conservés.
 
           La correction de WinError 6 au démarrage sans console reste vérifiée par deux lancements Windows avec les trois handles standards NULL : premier démarrage puis installation configurée, ouverture des services et fermeture propre sans perte de données.
 

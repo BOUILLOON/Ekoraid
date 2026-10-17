@@ -133,7 +133,7 @@ def test_frozen_supervisor_uses_external_home_and_stop_conserves_state(tmp_path,
                and options["env"]["DATA_DIR"] == str(cfg.data_dir) for _, options in launches)
     if windows:
         assert all(options["stdout"] is sys.stdout and options["stderr"] is sys.stderr
-                   and options["stdin"] == subprocess.DEVNULL and options["creationflags"] == 512
+                   and options["stdin"] == subprocess.DEVNULL and options["creationflags"] == (512 | 0x08000000)
                    for _, options in launches)
     assert len(records) == 3 and all(record["executable"] == sys.executable for record in records)
     assert terminated == [process.pid for process in children]

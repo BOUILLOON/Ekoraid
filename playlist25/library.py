@@ -19,6 +19,7 @@ import unicodedata
 import uuid
 
 from .db import now, source_dict
+from .processes import background_process_options
 
 
 class LibraryError(ValueError):
@@ -157,7 +158,8 @@ def verify_audio(path: str | Path, cfg, expected_duration: float | None = None) 
                "-format_whitelist", "mp3,wav,flac,ogg,aac,mov,matroska,webm,asf,aiff",
                "--", str(path.resolve())]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=min(float(cfg.task_timeout), 60), check=False)
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=min(float(cfg.task_timeout), 60), check=False, **background_process_options())
     except FileNotFoundError as exc:
         raise LibraryError("ffprobe est introuvable : installez FFmpeg et vérifiez les diagnostics.") from exc
     except subprocess.TimeoutExpired as exc:
