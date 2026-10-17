@@ -1,3 +1,20 @@
+# Validation du 17 octobre 2026 — fenêtres terminal du studio
+
+Les services, les diagnostics FFmpeg/ffprobe/Node, les métadonnées YouTube, le contrôle audio et le téléchargement utilisent le mode Windows sans console. Les lancements conservent leurs sorties capturées, les journaux, les délais et les groupes/Job Objects nécessaires à l’arrêt. L’entrée des outils non interactifs est reliée à NUL.
+
+| Vérification | Résultat |
+| --- | --- |
+| Suite Linux | **552 tests réussis, 3 ignorés et 7 sous-tests**, en **43,64 s**. Les trois cas ignorés exigent PowerShell ou l’allocation native d’une console Windows. |
+| Suite Windows | **554 cas réussis, 1 ignoré**, en **377,375 s**, selon le résumé JUnit public de cette livraison. |
+| Exécutable Windows | **20 contrôles réussis** : les 17 parcours antérieurs sont conservés, avec calibration de l’observateur, double diagnostic des outils et surveillance des consoles pendant l’ensemble de la fixture, jusqu’à l’arrêt. |
+| Console native | Une sonde CUI volontairement visible est réellement détectée. La même sonde avec CREATE_NO_WINDOW renvoie **GetConsoleWindow() = 0**. Le studio ne produit **aucune nouvelle console observée**, sans erreur de surveillance. |
+
+La surveillance utilise les événements WinEvent SHOW et une énumération toutes les 20 ms. Elle exclut les consoles présentes avant l’essai et ne filtre pas selon les processus descendants, car le propriétaire conhost peut être extérieur à l’arbre du studio. Les fenêtres extrêmement brèves peuvent échapper à la surveillance ; les tests vérifient aussi directement les options de création et l’absence de console d’un enfant CUI natif. Les titres de fenêtres ne sont pas enregistrés.
+
+La [release studio-windows-v2026.10.17.1](https://github.com/BOUILLOON/Ekoraid/releases/tag/studio-windows-v2026.10.17.1), commit `2c5dd3228b3f1711a48e83694b821514f5b0a93e`, est validée par le workflow [39038083520](https://github.com/BOUILLOON/Ekoraid/actions/runs/39038083520). Le [ZIP corrigé](https://github.com/BOUILLOON/Ekoraid/releases/download/studio-windows-v2026.10.17.1/Studio-Fanny-Windows.zip) contient **150 662 742 octets**. Les deux liens versionné/latest répondent HTTP **200** ; le fichier SHA-256 et le digest de l’asset concordent : `fe939199b6227811c9a744c01a52b07d689a6528f312a64e2e612c5c71a15754`.
+
+Les rapports `windows-smoke.json`, `pytest-summary.json` et `build-info.json` sont joints à la release. Les essais emploient des données temporaires et un WAV généré ; aucun audio externe ni aucune donnée Supabase ne sont écrits. Le site public reste déployé séparément. Pour mettre à jour, fermer le studio et extraire tout le ZIP dans un nouveau dossier ; les données privées restent à leur emplacement. Le lancement sur le PC physique de l’organisation reste à vérifier.
+
 # Validation du 14 octobre 2026
 
 Cette livraison ajoute la sauvegarde CSV/TXT du site public, les catégories gérées par un compte organisation vérifié, la connexion du studio sans arrêt, l’historique ZIP et des corrections de téléchargement. Les résultats sont distingués des essais historiques conservés plus bas.
